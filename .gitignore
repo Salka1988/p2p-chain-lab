@@ -1,0 +1,30 @@
+# Rust build output
+/target/
+**/*.rs.bk
+
+# Rust analyzer / cargo transient files
+/.rustc_info.json
+
+# Logs and runtime output
+*.log
+*.out
+*.err
+
+# Local environment files
+.env
+.env.*
+
+# OS metadata
+.DS_Store
+Thumbs.db
+
+# Editor / IDE local state
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Local Codex/plugin workspace state
+/.agents/
+/.codex-plugins/

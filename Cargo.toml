@@ -1,0 +1,26 @@
+[workspace]
+members = [
+    "bin/cli",
+    "crates/chain",
+    "crates/mempool",
+    "crates/network",
+    "crates/node",
+    "crates/protocol",
+    "crates/sync",
+]
+
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+
+[workspace.dependencies]
+anyhow = "1"
+bincode = "1"
+serde = { version = "1", features = ["derive"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal", "sync"] }
+tokio-util = "0.7"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }
+libp2p = { version = "0.56", features = ["cbor", "ed25519", "gossipsub", "macros", "noise", "ping", "request-response", "tcp", "tokio", "yamux"] }

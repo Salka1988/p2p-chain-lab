@@ -1,0 +1,8 @@
+[package]
+name = "libp2p-mini-chain-mempool"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+libp2p-mini-chain-protocol = { path = "../protocol" }
+tokio.workspace = true

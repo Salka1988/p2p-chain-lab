@@ -1,0 +1,15 @@
+[package]
+name = "libp2p-mini-chain-node"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+libp2p-mini-chain-chain = { path = "../chain" }
+libp2p-mini-chain-mempool = { path = "../mempool" }
+libp2p-mini-chain-network = { path = "../network" }
+libp2p-mini-chain-protocol = { path = "../protocol" }
+libp2p-mini-chain-sync = { path = "../sync" }
+tokio.workspace = true
+tokio-util.workspace = true
+tracing.workspace = true

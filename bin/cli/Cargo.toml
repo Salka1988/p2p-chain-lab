@@ -1,0 +1,16 @@
+[package]
+name = "libp2p-mini-chain-cli"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+anyhow.workspace = true
+libp2p-mini-chain-chain = { path = "../../crates/chain" }
+libp2p-mini-chain-mempool = { path = "../../crates/mempool" }
+libp2p-mini-chain-network = { path = "../../crates/network" }
+libp2p-mini-chain-node = { path = "../../crates/node" }
+libp2p-mini-chain-sync = { path = "../../crates/sync" }
+tokio.workspace = true
+tokio-util.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
