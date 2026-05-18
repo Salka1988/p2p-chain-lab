@@ -97,14 +97,14 @@ mod tests {
         let (command_tx, mut command_rx) = mpsc::channel(4);
         let sync = SyncService::new(NetworkHandle::new(command_tx), ChainStore::new());
 
-        sync.on_block_announcement("peer-a".to_string(), announcement(1))
+        sync.on_block_announcement(PeerId::from("peer-a"), announcement(1))
             .await
             .unwrap();
 
         assert!(matches!(
             command_rx.recv().await,
             Some(NetworkCommand::RequestBlock { peer_id, block_hash })
-                if peer_id == "peer-a" && block_hash == BlockHash::from_u8(1)
+                if peer_id == PeerId::from("peer-a") && block_hash == BlockHash::from_u8(1)
         ));
     }
 
@@ -115,7 +115,7 @@ mod tests {
         store.insert(block(1)).await;
         let sync = SyncService::new(NetworkHandle::new(command_tx), store);
 
-        sync.on_block_announcement("peer-a".to_string(), announcement(1))
+        sync.on_block_announcement(PeerId::from("peer-a"), announcement(1))
             .await
             .unwrap();
 

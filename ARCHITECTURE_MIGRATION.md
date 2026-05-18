@@ -184,6 +184,8 @@ Current simple behavior:
 - starts a real libp2p swarm
 - listens on configured `--listen` multiaddr
 - dials configured `--bootstrap` multiaddrs
+- wraps peer identities in `PeerId`
+- wraps dial/listen multiaddrs in `PeerAddress`
 - emits peer connect/disconnect events from real swarm events
 - publishes transactions over gossipsub
 - publishes block announcements over gossipsub
@@ -199,6 +201,12 @@ Current public ports:
 - `NetworkStatusPort`
 - `BlockRequestPort`
 - `BlockSendPort`
+
+Public network identity/address types:
+
+- `PeerId` is the app-level peer identity wrapper.
+- `PeerAddress` is the app-level multiaddr wrapper used for listen/bootstrap addresses.
+- libp2p `PeerId` and `Multiaddr` stay inside `network` adapter code.
 
 Not implemented yet:
 

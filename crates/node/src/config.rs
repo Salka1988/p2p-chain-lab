@@ -1,11 +1,11 @@
-use libp2p_mini_chain_network::service::NetworkConfig;
+use libp2p_mini_chain_network::{PeerAddress, service::NetworkConfig};
 
 const DEFAULT_LISTEN_ADDR: &str = "/ip4/127.0.0.1/tcp/0";
 
 #[derive(Debug, Clone)]
 pub struct Config {
-    pub listen_addr: String,
-    pub bootstrap_peers: Vec<String>,
+    pub listen_addr: PeerAddress,
+    pub bootstrap_peers: Vec<PeerAddress>,
 }
 
 impl Config {
@@ -24,34 +24,37 @@ impl Config {
         while let Some(arg) = args.next() {
             match arg.as_str() {
                 "--listen" => {
-                    config.listen_addr = next_value(&mut args, "--listen")?;
+                    config.listen_addr = PeerAddress::from(next_value(&mut args, "--listen")?);
                 }
                 "--bootstrap" => {
                     config
                         .bootstrap_peers
-                        .push(next_value(&mut args, "--bootstrap")?);
+                        .push(PeerAddress::from(next_value(&mut args, "--bootstrap")?));
                 }
                 "--help" | "-h" => {
                     anyhow::bail!("{}", Self::usage());
                 }
                 _ if arg.starts_with("--listen=") => {
-                    config.listen_addr = split_value(&arg, "--listen=")?;
+                    config.listen_addr = PeerAddress::from(split_value(&arg, "--listen=")?);
                 }
                 _ if arg.starts_with("--bootstrap=") => {
                     config
                         .bootstrap_peers
-                        .push(split_value(&arg, "--bootstrap=")?);
+                        .push(PeerAddress::from(split_value(&arg, "--bootstrap=")?));
                 }
                 _ => anyhow::bail!("unknown argument: {arg}\n\n{}", Self::usage()),
             }
         }
 
         anyhow::ensure!(
-            !config.listen_addr.is_empty(),
+            !config.listen_addr.as_str().is_empty(),
             "listen address cannot be empty"
         );
         anyhow::ensure!(
-            config.bootstrap_peers.iter().all(|peer| !peer.is_empty()),
+            config
+                .bootstrap_peers
+                .iter()
+                .all(|peer| !peer.as_str().is_empty()),
             "bootstrap peer cannot be empty"
         );
 
@@ -66,7 +69,7 @@ impl Config {
 impl Default for Config {
     fn default() -> Self {
         Self {
-            listen_addr: DEFAULT_LISTEN_ADDR.to_string(),
+            listen_addr: PeerAddress::from(DEFAULT_LISTEN_ADDR),
             bootstrap_peers: Vec::new(),
         }
     }
@@ -105,7 +108,7 @@ mod tests {
     fn uses_defaults_without_args() {
         let config = Config::parse_from(Vec::<String>::new()).unwrap();
 
-        assert_eq!(config.listen_addr, DEFAULT_LISTEN_ADDR);
+        assert_eq!(config.listen_addr.as_str(), DEFAULT_LISTEN_ADDR);
         assert!(config.bootstrap_peers.is_empty());
     }
 
@@ -120,13 +123,14 @@ mod tests {
         ])
         .unwrap();
 
-        assert_eq!(config.listen_addr, "/ip4/127.0.0.1/tcp/4001");
+        assert_eq!(config.listen_addr.as_str(), "/ip4/127.0.0.1/tcp/4001");
         assert_eq!(
-            config.bootstrap_peers,
-            vec![
-                "/ip4/127.0.0.1/tcp/4002".to_string(),
-                "/ip4/127.0.0.1/tcp/4003".to_string()
-            ]
+            config
+                .bootstrap_peers
+                .iter()
+                .map(PeerAddress::as_str)
+                .collect::<Vec<_>>(),
+            vec!["/ip4/127.0.0.1/tcp/4002", "/ip4/127.0.0.1/tcp/4003"]
         );
     }
 
