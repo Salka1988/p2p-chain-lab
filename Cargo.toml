@@ -25,4 +25,4 @@ tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal", "syn
 tokio-util = "0.7"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }
-libp2p = { version = "0.56", features = ["cbor", "ed25519", "gossipsub", "macros", "noise", "ping", "request-response", "tcp", "tokio", "yamux"] }
+libp2p = { version = "0.56", features = ["cbor", "dns", "ed25519", "gossipsub", "macros", "noise", "ping", "request-response", "tcp", "tokio", "yamux"] }

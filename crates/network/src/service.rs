@@ -198,6 +198,7 @@ impl NetworkService {
                 libp2p::noise::Config::new,
                 libp2p::yamux::Config::default,
             )?
+            .with_dns()?
             .with_behaviour(|keypair: &Keypair| NetworkBehaviour::new(keypair.clone()))?
             .build();
 
