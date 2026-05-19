@@ -1,6 +1,7 @@
 use libp2p::{
     StreamProtocol, gossipsub,
     identity::Keypair,
+    kad::{self, store::MemoryStore},
     ping,
     request_response::{self, ProtocolSupport, cbor},
 };
@@ -13,12 +14,13 @@ pub const BLOCK_REQUEST_PROTOCOL: &str = "/libp2p-mini-chain/block-request/1";
 #[derive(libp2p::swarm::NetworkBehaviour)]
 pub struct NetworkBehaviour {
     pub ping: ping::Behaviour,
+    pub kademlia: kad::Behaviour<MemoryStore>,
     pub gossipsub: gossipsub::Behaviour,
     pub block_request_response: cbor::Behaviour<BlockRequest, BlockResponse>,
 }
 
 impl NetworkBehaviour {
-    pub fn new(keypair: Keypair) -> Self {
+    pub fn new(keypair: Keypair, local_peer_id: libp2p::PeerId) -> Self {
         let mut gossipsub = gossipsub::Behaviour::new(
             gossipsub::MessageAuthenticity::Signed(keypair),
             gossipsub::Config::default(),
@@ -39,8 +41,11 @@ impl NetworkBehaviour {
             request_response::Config::default(),
         );
 
+        let kademlia = kad::Behaviour::new(local_peer_id, MemoryStore::new(local_peer_id));
+
         Self {
             ping: ping::Behaviour::new(ping::Config::default()),
+            kademlia,
             gossipsub,
             block_request_response,
         }

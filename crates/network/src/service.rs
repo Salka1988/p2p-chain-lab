@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use anyhow::Context;
 use async_trait::async_trait;
 use libp2p::{
-    Multiaddr, Swarm, SwarmBuilder, futures::StreamExt, gossipsub, identity::Keypair,
+    Multiaddr, Swarm, SwarmBuilder, futures::StreamExt, gossipsub, identity::Keypair, multiaddr,
     request_response, swarm::SwarmEvent,
 };
 use libp2p_mini_chain_chain::block::{Block, BlockHash};
@@ -194,7 +194,9 @@ impl NetworkService {
                 libp2p::yamux::Config::default,
             )?
             .with_dns()?
-            .with_behaviour(|keypair: &Keypair| NetworkBehaviour::new(keypair.clone()))?
+            .with_behaviour(|keypair: &Keypair| {
+                NetworkBehaviour::new(keypair.clone(), keypair.public().to_peer_id())
+            })?
             .build();
 
         tracing::info!(%local_peer_id, "local peer id");
@@ -205,10 +207,23 @@ impl NetworkService {
                 .as_str()
                 .parse()
                 .with_context(|| format!("invalid bootstrap peer address: {peer}"))?;
+            if let Some(peer_id) = Self::peer_id_from_addr(&peer_addr) {
+                swarm
+                    .behaviour_mut()
+                    .kademlia
+                    .add_address(&peer_id, peer_addr.clone());
+            }
             swarm.dial(peer_addr)?;
         }
 
         Ok(swarm)
+    }
+
+    fn peer_id_from_addr(addr: &Multiaddr) -> Option<libp2p::PeerId> {
+        addr.iter().find_map(|protocol| match protocol {
+            multiaddr::Protocol::P2p(peer_id) => Some(peer_id),
+            _ => None,
+        })
     }
 
     fn build_identity(&self) -> anyhow::Result<Keypair> {
@@ -334,6 +349,9 @@ impl NetworkService {
             }
             SwarmEvent::Behaviour(NetworkBehaviourEvent::Ping(event)) => {
                 tracing::debug!(?event, "ping event");
+            }
+            SwarmEvent::Behaviour(NetworkBehaviourEvent::Kademlia(event)) => {
+                tracing::debug!(?event, "kademlia event");
             }
             _ => {}
         }
