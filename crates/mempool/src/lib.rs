@@ -1,10 +1,12 @@
-use std::{collections::HashMap, future::Future, sync::Arc};
+use std::{collections::HashMap, sync::Arc};
 
+use async_trait::async_trait;
 use libp2p_mini_chain_protocol::messages::{Transaction, TransactionId};
 use tokio::sync::Mutex;
 
+#[async_trait]
 pub trait MempoolPort: Clone + Send + Sync + 'static {
-    fn insert_transaction(&self, tx: Transaction) -> impl Future<Output = bool> + Send + '_;
+    async fn insert_transaction(&self, tx: Transaction) -> bool;
 }
 
 #[derive(Debug, Clone, Default)]
@@ -38,9 +40,10 @@ impl Mempool {
     }
 }
 
+#[async_trait]
 impl MempoolPort for Mempool {
-    fn insert_transaction(&self, tx: Transaction) -> impl Future<Output = bool> + Send + '_ {
-        self.insert(tx)
+    async fn insert_transaction(&self, tx: Transaction) -> bool {
+        self.insert(tx).await
     }
 }
 

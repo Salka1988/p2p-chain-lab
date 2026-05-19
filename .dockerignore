@@ -1,0 +1,8 @@
+target/
+.git/
+.DS_Store
+.agents/
+.codex-plugins/
+*.log
+*.out
+*.err

@@ -1,16 +1,15 @@
-use std::{collections::HashMap, future::Future, sync::Arc};
+use std::{collections::HashMap, sync::Arc};
 
+use async_trait::async_trait;
 use tokio::sync::Mutex;
 
 use crate::block::{Block, BlockHash};
 
+#[async_trait]
 pub trait BlockStorePort: Clone + Send + Sync + 'static {
-    fn get_block<'a>(
-        &'a self,
-        hash: &'a BlockHash,
-    ) -> impl Future<Output = Option<Block>> + Send + 'a;
+    async fn get_block(&self, hash: &BlockHash) -> Option<Block>;
 
-    fn insert_block(&self, block: Block) -> impl Future<Output = bool> + Send + '_;
+    async fn insert_block(&self, block: Block) -> bool;
 }
 
 #[derive(Debug, Clone, Default)]
@@ -44,16 +43,14 @@ impl ChainStore {
     }
 }
 
+#[async_trait]
 impl BlockStorePort for ChainStore {
-    fn get_block<'a>(
-        &'a self,
-        hash: &'a BlockHash,
-    ) -> impl Future<Output = Option<Block>> + Send + 'a {
-        self.get(hash)
+    async fn get_block(&self, hash: &BlockHash) -> Option<Block> {
+        self.get(hash).await
     }
 
-    fn insert_block(&self, block: Block) -> impl Future<Output = bool> + Send + '_ {
-        self.insert(block)
+    async fn insert_block(&self, block: Block) -> bool {
+        self.insert(block).await
     }
 }
 

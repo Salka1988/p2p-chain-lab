@@ -4,5 +4,6 @@ version.workspace = true
 edition.workspace = true
 
 [dependencies]
+async-trait.workspace = true
 libp2p-mini-chain-protocol = { path = "../protocol" }
 tokio.workspace = true

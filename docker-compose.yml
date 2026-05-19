@@ -1,0 +1,40 @@
+services:
+  bootstrap:
+    build: .
+    command:
+      - --listen
+      - /ip4/0.0.0.0/tcp/4001
+      - --node-key-seed
+      - bootstrap
+    ports:
+      - "4001:4001"
+    environment:
+      RUST_LOG: debug
+
+  node-a:
+    build: .
+    command:
+      - --listen
+      - /ip4/0.0.0.0/tcp/4001
+      - --node-key-seed
+      - node-a
+      - --bootstrap
+      - /dns4/bootstrap/tcp/4001
+    depends_on:
+      - bootstrap
+    environment:
+      RUST_LOG: debug
+
+  node-b:
+    build: .
+    command:
+      - --listen
+      - /ip4/0.0.0.0/tcp/4001
+      - --node-key-seed
+      - node-b
+      - --bootstrap
+      - /dns4/bootstrap/tcp/4001
+    depends_on:
+      - bootstrap
+    environment:
+      RUST_LOG: debug

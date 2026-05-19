@@ -1,15 +1,15 @@
-use std::future::Future;
-
+use async_trait::async_trait;
 use libp2p_mini_chain_chain::store::BlockStorePort;
 use libp2p_mini_chain_network::{PeerId, service::BlockRequestPort};
 use libp2p_mini_chain_protocol::messages::BlockAnnouncement;
 
+#[async_trait]
 pub trait SyncPort: Clone + Send + Sync + 'static {
-    fn on_block_announcement(
+    async fn on_block_announcement(
         &self,
         peer_id: PeerId,
         announcement: BlockAnnouncement,
-    ) -> impl Future<Output = anyhow::Result<()>> + Send + '_;
+    ) -> anyhow::Result<()>;
 }
 
 #[derive(Debug, Clone)]
@@ -52,17 +52,18 @@ where
     }
 }
 
+#[async_trait]
 impl<N, C> SyncPort for SyncService<N, C>
 where
     N: BlockRequestPort,
     C: BlockStorePort,
 {
-    fn on_block_announcement(
+    async fn on_block_announcement(
         &self,
         peer_id: PeerId,
         announcement: BlockAnnouncement,
-    ) -> impl Future<Output = anyhow::Result<()>> + Send + '_ {
-        self.on_block_announcement(peer_id, announcement)
+    ) -> anyhow::Result<()> {
+        self.on_block_announcement(peer_id, announcement).await
     }
 }
 

@@ -10,6 +10,9 @@
 *.out
 *.err
 
+# Markdown docs
+*.md
+
 # Local environment files
 .env
 .env.*

@@ -1,6 +1,7 @@
-use std::{collections::HashMap, future::Future};
+use std::collections::HashMap;
 
 use anyhow::Context;
+use async_trait::async_trait;
 use libp2p::{
     Multiaddr, Swarm, SwarmBuilder, futures::StreamExt, gossipsub, identity::Keypair,
     request_response, swarm::SwarmEvent,
@@ -10,6 +11,7 @@ use libp2p_mini_chain_protocol::{
     codec,
     messages::{BlockAnnouncement, BlockRequest, BlockResponse, Transaction},
 };
+use sha2::{Digest, Sha256};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
@@ -25,6 +27,7 @@ use crate::{
 pub struct NetworkConfig {
     pub listen_addr: PeerAddress,
     pub bootstrap_peers: Vec<PeerAddress>,
+    pub node_key_seed: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -37,20 +40,14 @@ pub trait NetworkStatusPort: Clone + Send + Sync + 'static {
     fn listen_addr(&self) -> &str;
 }
 
+#[async_trait]
 pub trait BlockRequestPort: Clone + Send + Sync + 'static {
-    fn request_block(
-        &self,
-        peer_id: PeerId,
-        block_hash: BlockHash,
-    ) -> impl Future<Output = anyhow::Result<()>> + Send + '_;
+    async fn request_block(&self, peer_id: PeerId, block_hash: BlockHash) -> anyhow::Result<()>;
 }
 
+#[async_trait]
 pub trait BlockSendPort: Clone + Send + Sync + 'static {
-    fn send_block(
-        &self,
-        peer_id: PeerId,
-        block: Block,
-    ) -> impl Future<Output = anyhow::Result<()>> + Send + '_;
+    async fn send_block(&self, peer_id: PeerId, block: Block) -> anyhow::Result<()>;
 }
 
 impl NetworkHandle {
@@ -84,26 +81,22 @@ impl NetworkStatusPort for NetworkHandle {
     }
 }
 
+#[async_trait]
 impl BlockRequestPort for NetworkHandle {
-    fn request_block(
-        &self,
-        peer_id: PeerId,
-        block_hash: BlockHash,
-    ) -> impl Future<Output = anyhow::Result<()>> + Send + '_ {
+    async fn request_block(&self, peer_id: PeerId, block_hash: BlockHash) -> anyhow::Result<()> {
         self.send(NetworkCommand::RequestBlock {
             peer_id,
             block_hash,
         })
+        .await
     }
 }
 
+#[async_trait]
 impl BlockSendPort for NetworkHandle {
-    fn send_block(
-        &self,
-        peer_id: PeerId,
-        block: Block,
-    ) -> impl Future<Output = anyhow::Result<()>> + Send + '_ {
+    async fn send_block(&self, peer_id: PeerId, block: Block) -> anyhow::Result<()> {
         self.send(NetworkCommand::SendBlock { peer_id, block })
+            .await
     }
 }
 
@@ -195,7 +188,10 @@ impl NetworkService {
             .parse()
             .context("invalid network listen address")?;
 
-        let mut swarm = SwarmBuilder::with_new_identity()
+        let identity = self.build_identity()?;
+        let local_peer_id = identity.public().to_peer_id();
+
+        let mut swarm = SwarmBuilder::with_existing_identity(identity)
             .with_tokio()
             .with_tcp(
                 libp2p::tcp::Config::default(),
@@ -205,6 +201,7 @@ impl NetworkService {
             .with_behaviour(|keypair: &Keypair| NetworkBehaviour::new(keypair.clone()))?
             .build();
 
+        tracing::info!(%local_peer_id, "local peer id");
         swarm.listen_on(listen_addr)?;
 
         for peer in &self.config.bootstrap_peers {
@@ -216,6 +213,16 @@ impl NetworkService {
         }
 
         Ok(swarm)
+    }
+
+    fn build_identity(&self) -> anyhow::Result<Keypair> {
+        let Some(seed) = &self.config.node_key_seed else {
+            return Ok(Keypair::generate_ed25519());
+        };
+
+        let secret_key = Sha256::digest(seed.as_bytes());
+        Keypair::ed25519_from_bytes(secret_key.to_vec())
+            .context("failed to build deterministic ed25519 keypair from node key seed")
     }
 
     async fn handle_command(
@@ -486,6 +493,21 @@ mod tests {
     use libp2p_mini_chain_chain::block::{Block, BlockHash};
     use libp2p_mini_chain_protocol::messages::{BlockAnnouncement, Transaction, TransactionId};
 
+    fn service_with_seed(seed: Option<&str>) -> NetworkService {
+        let (_command_tx, command_rx) = mpsc::channel(4);
+        let (event_tx, _event_rx) = mpsc::channel(4);
+        NetworkService::new(
+            NetworkConfig {
+                listen_addr: PeerAddress::from("/ip4/127.0.0.1/tcp/0"),
+                bootstrap_peers: Vec::new(),
+                node_key_seed: seed.map(ToOwned::to_owned),
+            },
+            command_rx,
+            event_tx,
+        )
+        .unwrap()
+    }
+
     #[test]
     fn broadcast_transaction_encodes_protocol_payload() {
         let tx = Transaction {
@@ -513,5 +535,27 @@ mod tests {
 
         assert_eq!(decoded.block_hash, BlockHash::from_u8(1));
         assert_eq!(decoded.height, 10);
+    }
+
+    #[test]
+    fn node_key_seed_builds_stable_peer_id() {
+        let first = service_with_seed(Some("node-a"))
+            .build_identity()
+            .unwrap()
+            .public()
+            .to_peer_id();
+        let second = service_with_seed(Some("node-a"))
+            .build_identity()
+            .unwrap()
+            .public()
+            .to_peer_id();
+        let third = service_with_seed(Some("node-b"))
+            .build_identity()
+            .unwrap()
+            .public()
+            .to_peer_id();
+
+        assert_eq!(first, second);
+        assert_ne!(first, third);
     }
 }

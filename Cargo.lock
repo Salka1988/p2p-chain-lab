@@ -1495,6 +1495,7 @@ dependencies = [
 name = "libp2p-mini-chain-chain"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "serde",
  "tokio",
 ]
@@ -1519,6 +1520,7 @@ dependencies = [
 name = "libp2p-mini-chain-mempool"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "libp2p-mini-chain-protocol",
  "tokio",
 ]
@@ -1528,9 +1530,11 @@ name = "libp2p-mini-chain-network"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "async-trait",
  "libp2p",
  "libp2p-mini-chain-chain",
  "libp2p-mini-chain-protocol",
+ "sha2",
  "tokio",
  "tokio-util",
  "tracing",
@@ -1566,6 +1570,7 @@ name = "libp2p-mini-chain-sync"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "async-trait",
  "libp2p-mini-chain-chain",
  "libp2p-mini-chain-network",
  "libp2p-mini-chain-protocol",

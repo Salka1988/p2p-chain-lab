@@ -6,6 +6,7 @@ const DEFAULT_LISTEN_ADDR: &str = "/ip4/127.0.0.1/tcp/0";
 pub struct Config {
     pub listen_addr: PeerAddress,
     pub bootstrap_peers: Vec<PeerAddress>,
+    pub node_key_seed: Option<String>,
 }
 
 impl Config {
@@ -31,6 +32,9 @@ impl Config {
                         .bootstrap_peers
                         .push(PeerAddress::from(next_value(&mut args, "--bootstrap")?));
                 }
+                "--node-key-seed" => {
+                    config.node_key_seed = Some(next_value(&mut args, "--node-key-seed")?);
+                }
                 "--help" | "-h" => {
                     anyhow::bail!("{}", Self::usage());
                 }
@@ -41,6 +45,9 @@ impl Config {
                     config
                         .bootstrap_peers
                         .push(PeerAddress::from(split_value(&arg, "--bootstrap=")?));
+                }
+                _ if arg.starts_with("--node-key-seed=") => {
+                    config.node_key_seed = Some(split_value(&arg, "--node-key-seed=")?);
                 }
                 _ => anyhow::bail!("unknown argument: {arg}\n\n{}", Self::usage()),
             }
@@ -62,7 +69,7 @@ impl Config {
     }
 
     pub fn usage() -> &'static str {
-        "usage: libp2p-mini-chain-cli [--listen <addr>] [--bootstrap <addr>...]"
+        "usage: libp2p-mini-chain-cli [--listen <addr>] [--bootstrap <addr>...] [--node-key-seed <seed>]"
     }
 }
 
@@ -71,6 +78,7 @@ impl Default for Config {
         Self {
             listen_addr: PeerAddress::from(DEFAULT_LISTEN_ADDR),
             bootstrap_peers: Vec::new(),
+            node_key_seed: None,
         }
     }
 }
@@ -80,6 +88,7 @@ impl From<Config> for NetworkConfig {
         Self {
             listen_addr: config.listen_addr,
             bootstrap_peers: config.bootstrap_peers,
+            node_key_seed: config.node_key_seed,
         }
     }
 }
@@ -110,6 +119,7 @@ mod tests {
 
         assert_eq!(config.listen_addr.as_str(), DEFAULT_LISTEN_ADDR);
         assert!(config.bootstrap_peers.is_empty());
+        assert_eq!(config.node_key_seed, None);
     }
 
     #[test]
@@ -120,6 +130,8 @@ mod tests {
             "--bootstrap",
             "/ip4/127.0.0.1/tcp/4002",
             "--bootstrap=/ip4/127.0.0.1/tcp/4003",
+            "--node-key-seed",
+            "node-a",
         ])
         .unwrap();
 
@@ -132,6 +144,14 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec!["/ip4/127.0.0.1/tcp/4002", "/ip4/127.0.0.1/tcp/4003"]
         );
+        assert_eq!(config.node_key_seed, Some("node-a".to_string()));
+    }
+
+    #[test]
+    fn parses_equals_node_key_seed() {
+        let config = Config::parse_from(["--node-key-seed=node-a"]).unwrap();
+
+        assert_eq!(config.node_key_seed, Some("node-a".to_string()));
     }
 
     #[test]
