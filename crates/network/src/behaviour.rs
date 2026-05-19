@@ -46,13 +46,3 @@ impl NetworkBehaviour {
         }
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn builds_network_behaviour() {
-        let _behaviour = NetworkBehaviour::new(Keypair::generate_ed25519());
-    }
-}

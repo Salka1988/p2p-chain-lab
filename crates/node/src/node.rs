@@ -4,6 +4,7 @@ use libp2p_mini_chain_chain::store::BlockStorePort;
 use libp2p_mini_chain_mempool::MempoolPort;
 use libp2p_mini_chain_network::{
     event::NetworkEvent,
+    peer_score::PeerReputationPort,
     service::{BlockSendPort, NetworkStatusPort},
 };
 use libp2p_mini_chain_protocol::validation::validate_block;
@@ -11,30 +12,33 @@ use libp2p_mini_chain_sync::SyncPort;
 use tokio::{sync::mpsc, task::JoinHandle};
 use tokio_util::sync::CancellationToken;
 
-pub struct Node<N, C, M, S>
+pub struct Node<N, C, M, S, R>
 where
     N: NetworkStatusPort + BlockSendPort,
     C: BlockStorePort,
     M: MempoolPort,
     S: SyncPort,
+    R: PeerReputationPort,
 {
     network: N,
     event_loop_handle: JoinHandle<()>,
-    _ports: PhantomData<(C, M, S)>,
+    _ports: PhantomData<(C, M, S, R)>,
 }
 
-impl<N, C, M, S> Node<N, C, M, S>
+impl<N, C, M, S, R> Node<N, C, M, S, R>
 where
     N: NetworkStatusPort + BlockSendPort,
     C: BlockStorePort,
     M: MempoolPort,
     S: SyncPort,
+    R: PeerReputationPort,
 {
     pub fn new(
         network: N,
         chain_store: C,
         mempool: M,
         sync_service: S,
+        peer_reputation: R,
         network_event_rx: mpsc::Receiver<NetworkEvent>,
         cancellation_token: CancellationToken,
     ) -> Self {
@@ -43,6 +47,7 @@ where
             mempool,
             network.clone(),
             sync_service,
+            peer_reputation,
             network_event_rx,
             cancellation_token.child_token(),
         );
@@ -77,6 +82,7 @@ where
         mempool: M,
         network: N,
         sync_service: S,
+        peer_reputation: R,
         mut network_event_rx: tokio::sync::mpsc::Receiver<NetworkEvent>,
         cancellation_token: CancellationToken,
     ) -> JoinHandle<()> {
@@ -93,6 +99,9 @@ where
                         };
 
                         match event {
+                            NetworkEvent::Listening(address) => {
+                                tracing::info!(%address, "network listening");
+                            }
                             NetworkEvent::TransactionReceived { peer_id, tx } => {
                                 tracing::info!(%peer_id, ?tx, "transaction received");
                                 let inserted = mempool.insert_transaction(tx).await;
@@ -116,9 +125,21 @@ where
                                     Ok(()) => {
                                         let inserted = chain_store.insert_block(block).await;
                                         tracing::debug!(inserted, "block store insert finished");
+                                        if let Err(error) = peer_reputation
+                                            .report_good_peer(peer_id, "valid block received".to_string())
+                                            .await
+                                        {
+                                            tracing::warn!(?error, "failed to report good peer");
+                                        }
                                     }
                                     Err(error) => {
                                         tracing::warn!(%peer_id, ?error, "received invalid block");
+                                        if let Err(report_error) = peer_reputation
+                                            .report_bad_peer(peer_id, format!("invalid block: {error:?}"))
+                                            .await
+                                        {
+                                            tracing::warn!(?report_error, "failed to report bad peer");
+                                        }
                                     }
                                 }
                             }

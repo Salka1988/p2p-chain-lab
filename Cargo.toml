@@ -21,7 +21,7 @@ async-trait = "0.1"
 bincode = "1"
 serde = { version = "1", features = ["derive"] }
 sha2 = "0.10"
-tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal", "sync"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal", "sync", "time"] }
 tokio-util = "0.7"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }

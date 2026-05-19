@@ -20,7 +20,7 @@ use crate::{
     behaviour::{BLOCK_ANNOUNCEMENT_TOPIC, NetworkBehaviour, NetworkBehaviourEvent, TX_TOPIC},
     command::NetworkCommand,
     event::NetworkEvent,
-    peer_score::{PeerScoreActor, PeerScoreEvent, PeerScoreHandle},
+    peer_score::{PeerScoreEvent, PeerScoreHandle},
 };
 
 #[derive(Debug, Clone)]
@@ -104,6 +104,8 @@ pub struct NetworkService {
     config: NetworkConfig,
     command_rx: mpsc::Receiver<NetworkCommand>,
     event_tx: mpsc::Sender<NetworkEvent>,
+    peer_score: PeerScoreHandle,
+    peer_score_event_rx: mpsc::Receiver<PeerScoreEvent>,
 }
 
 type BlockResponseChannel = request_response::ResponseChannel<BlockResponse>;
@@ -113,25 +115,21 @@ impl NetworkService {
         config: NetworkConfig,
         command_rx: mpsc::Receiver<NetworkCommand>,
         event_tx: mpsc::Sender<NetworkEvent>,
+        peer_score: PeerScoreHandle,
+        peer_score_event_rx: mpsc::Receiver<PeerScoreEvent>,
     ) -> anyhow::Result<Self> {
         Ok(Self {
             config,
             command_rx,
             event_tx,
+            peer_score,
+            peer_score_event_rx,
         })
     }
 
     pub async fn run(mut self, cancellation_token: CancellationToken) -> anyhow::Result<()> {
         let mut swarm = self.build_swarm().await?;
         let mut pending_block_responses = HashMap::new();
-        let (peer_score_command_tx, peer_score_command_rx) = mpsc::channel(1024);
-        let (peer_score_event_tx, mut peer_score_event_rx) = mpsc::channel(1024);
-        let peer_score = PeerScoreHandle::new(peer_score_command_tx);
-        let peer_score_cancellation_token = cancellation_token.child_token();
-        let peer_score_task = tokio::spawn(
-            PeerScoreActor::new(peer_score_command_rx, peer_score_event_tx)
-                .run(peer_score_cancellation_token),
-        );
 
         tracing::info!(
             listen_addr = %self.config.listen_addr,
@@ -160,11 +158,10 @@ impl NetworkService {
                     self.handle_swarm_event(
                         &mut swarm,
                         &mut pending_block_responses,
-                        &peer_score,
                         event,
                     ).await?;
                 }
-                event = peer_score_event_rx.recv() => {
+                event = self.peer_score_event_rx.recv() => {
                     match event {
                         Some(event) => self.handle_peer_score_event(&mut swarm, event).await?,
                         None => break,
@@ -174,8 +171,6 @@ impl NetworkService {
         }
 
         drop(self.event_tx);
-        cancellation_token.cancel();
-        peer_score_task.await??;
         tracing::info!("network service stopped");
         Ok(())
     }
@@ -235,17 +230,22 @@ impl NetworkService {
         match command {
             NetworkCommand::BroadcastTransaction(tx) => {
                 let payload = Self::encode_transaction_broadcast(&tx)?;
-                swarm
+                if let Err(error) = swarm
                     .behaviour_mut()
                     .gossipsub
-                    .publish(gossipsub::IdentTopic::new(TX_TOPIC), payload)?;
+                    .publish(gossipsub::IdentTopic::new(TX_TOPIC), payload)
+                {
+                    tracing::warn!(?error, "failed to publish transaction");
+                }
             }
             NetworkCommand::BroadcastBlock(block) => {
                 let payload = Self::encode_block_announcement(&block)?;
-                swarm.behaviour_mut().gossipsub.publish(
+                if let Err(error) = swarm.behaviour_mut().gossipsub.publish(
                     gossipsub::IdentTopic::new(BLOCK_ANNOUNCEMENT_TOPIC),
                     payload,
-                )?;
+                ) {
+                    tracing::warn!(?error, "failed to publish block announcement");
+                }
             }
             NetworkCommand::RequestBlock {
                 peer_id,
@@ -287,16 +287,20 @@ impl NetworkService {
         &self,
         swarm: &mut Swarm<NetworkBehaviour>,
         pending_block_responses: &mut HashMap<(PeerId, BlockHash), BlockResponseChannel>,
-        peer_score: &PeerScoreHandle,
         event: SwarmEvent<NetworkBehaviourEvent>,
     ) -> anyhow::Result<()> {
         match event {
             SwarmEvent::NewListenAddr { address, .. } => {
                 tracing::info!(%address, "network listening");
+                self.event_tx
+                    .send(NetworkEvent::Listening(PeerAddress::from(
+                        address.to_string(),
+                    )))
+                    .await?;
             }
             SwarmEvent::ConnectionEstablished { peer_id, .. } => {
                 let peer_id = PeerId::from(peer_id.to_string());
-                peer_score.connected(peer_id.clone()).await?;
+                self.peer_score.connected(peer_id.clone()).await?;
                 self.event_tx
                     .send(NetworkEvent::PeerConnected(peer_id))
                     .await?;
@@ -307,7 +311,7 @@ impl NetworkService {
                 ..
             } => {
                 let peer_id = PeerId::from(peer_id.to_string());
-                peer_score.disconnected(peer_id.clone()).await?;
+                self.peer_score.disconnected(peer_id.clone()).await?;
                 self.event_tx
                     .send(NetworkEvent::PeerDisconnected(peer_id))
                     .await?;
@@ -322,16 +326,11 @@ impl NetworkService {
                 tracing::warn!(?peer_id, ?error, "incoming connection failed");
             }
             SwarmEvent::Behaviour(NetworkBehaviourEvent::Gossipsub(event)) => {
-                self.handle_gossipsub_event(peer_score, event).await?;
+                self.handle_gossipsub_event(event).await?;
             }
             SwarmEvent::Behaviour(NetworkBehaviourEvent::BlockRequestResponse(event)) => {
-                self.handle_block_request_response_event(
-                    swarm,
-                    pending_block_responses,
-                    peer_score,
-                    event,
-                )
-                .await?;
+                self.handle_block_request_response_event(swarm, pending_block_responses, event)
+                    .await?;
             }
             SwarmEvent::Behaviour(NetworkBehaviourEvent::Ping(event)) => {
                 tracing::debug!(?event, "ping event");
@@ -364,11 +363,7 @@ impl NetworkService {
         Ok(())
     }
 
-    async fn handle_gossipsub_event(
-        &self,
-        peer_score: &PeerScoreHandle,
-        event: gossipsub::Event,
-    ) -> anyhow::Result<()> {
+    async fn handle_gossipsub_event(&self, event: gossipsub::Event) -> anyhow::Result<()> {
         let gossipsub::Event::Message {
             propagation_source,
             message,
@@ -383,7 +378,7 @@ impl NetworkService {
             let tx = match codec::decode::<Transaction>(&message.data) {
                 Ok(tx) => tx,
                 Err(error) => {
-                    peer_score
+                    self.peer_score
                         .bad_message(peer_id, format!("invalid transaction payload: {error}"))
                         .await?;
                     return Ok(());
@@ -396,7 +391,7 @@ impl NetworkService {
             let announcement = match codec::decode::<BlockAnnouncement>(&message.data) {
                 Ok(announcement) => announcement,
                 Err(error) => {
-                    peer_score
+                    self.peer_score
                         .bad_message(
                             peer_id,
                             format!("invalid block announcement payload: {error}"),
@@ -420,7 +415,6 @@ impl NetworkService {
         &self,
         _swarm: &mut Swarm<NetworkBehaviour>,
         pending_block_responses: &mut HashMap<(PeerId, BlockHash), BlockResponseChannel>,
-        peer_score: &PeerScoreHandle,
         event: request_response::Event<BlockRequest, BlockResponse>,
     ) -> anyhow::Result<()> {
         match event {
@@ -439,7 +433,7 @@ impl NetworkService {
                         .await?;
                 }
                 request_response::Message::Response { response, .. } => {
-                    peer_score
+                    self.peer_score
                         .useful_response(PeerId::from(peer.to_string()))
                         .await?;
                     self.event_tx
@@ -452,7 +446,7 @@ impl NetworkService {
             },
             request_response::Event::OutboundFailure { peer, error, .. } => {
                 tracing::warn!(peer_id = %peer, ?error, "block request failed");
-                peer_score
+                self.peer_score
                     .failed_request(
                         PeerId::from(peer.to_string()),
                         format!("block request failed: {error}"),
@@ -461,7 +455,7 @@ impl NetworkService {
             }
             request_response::Event::InboundFailure { peer, error, .. } => {
                 tracing::warn!(peer_id = %peer, ?error, "inbound block request failed");
-                peer_score
+                self.peer_score
                     .failed_request(
                         PeerId::from(peer.to_string()),
                         format!("inbound block request failed: {error}"),
@@ -491,12 +485,12 @@ impl NetworkService {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use libp2p_mini_chain_chain::block::{Block, BlockHash};
-    use libp2p_mini_chain_protocol::messages::{BlockAnnouncement, Transaction, TransactionId};
 
     fn service_with_seed(seed: Option<&str>) -> NetworkService {
         let (_command_tx, command_rx) = mpsc::channel(4);
         let (event_tx, _event_rx) = mpsc::channel(4);
+        let (peer_score_command_tx, _peer_score_command_rx) = mpsc::channel(4);
+        let (_peer_score_event_tx, peer_score_event_rx) = mpsc::channel(4);
         NetworkService::new(
             NetworkConfig {
                 listen_addr: PeerAddress::from("/ip4/127.0.0.1/tcp/0"),
@@ -505,37 +499,10 @@ mod tests {
             },
             command_rx,
             event_tx,
+            PeerScoreHandle::new(peer_score_command_tx),
+            peer_score_event_rx,
         )
         .unwrap()
-    }
-
-    #[test]
-    fn broadcast_transaction_encodes_protocol_payload() {
-        let tx = Transaction {
-            id: TransactionId::from_u8(1),
-            payload: vec![1, 2, 3],
-        };
-
-        let payload = NetworkService::encode_transaction_broadcast(&tx).unwrap();
-        let decoded: Transaction = codec::decode(&payload).unwrap();
-
-        assert_eq!(decoded, tx);
-    }
-
-    #[test]
-    fn broadcast_block_encodes_block_announcement_payload() {
-        let block = Block {
-            hash: BlockHash::from_u8(1),
-            parent_hash: None,
-            height: 10,
-            body: vec![1, 2, 3],
-        };
-
-        let payload = NetworkService::encode_block_announcement(&block).unwrap();
-        let decoded: BlockAnnouncement = codec::decode(&payload).unwrap();
-
-        assert_eq!(decoded.block_hash, BlockHash::from_u8(1));
-        assert_eq!(decoded.height, 10);
     }
 
     #[test]

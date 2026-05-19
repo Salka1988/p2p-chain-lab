@@ -1,10 +1,11 @@
 use libp2p_mini_chain_chain::block::{Block, BlockHash};
 use libp2p_mini_chain_protocol::messages::{BlockAnnouncement, Transaction};
 
-use crate::PeerId;
+use crate::{PeerAddress, PeerId};
 
 #[derive(Debug)]
 pub enum NetworkEvent {
+    Listening(PeerAddress),
     TransactionReceived {
         peer_id: PeerId,
         tx: Transaction,
