@@ -1,15 +1,15 @@
 [package]
-name = "libp2p-mini-chain-cli"
+name = "p2p-chain-lab-cli"
 version = "0.1.0"
 edition = "2024"
 
 [dependencies]
 anyhow.workspace = true
-libp2p-mini-chain-chain = { path = "../../crates/chain" }
-libp2p-mini-chain-mempool = { path = "../../crates/mempool" }
-libp2p-mini-chain-network = { path = "../../crates/network" }
-libp2p-mini-chain-node = { path = "../../crates/node" }
-libp2p-mini-chain-sync = { path = "../../crates/sync" }
+p2p-chain-lab-chain = { path = "../../crates/chain" }
+p2p-chain-lab-mempool = { path = "../../crates/mempool" }
+p2p-chain-lab-network = { path = "../../crates/network" }
+p2p-chain-lab-node = { path = "../../crates/node" }
+p2p-chain-lab-sync = { path = "../../crates/sync" }
 tokio.workspace = true
 tokio-util.workspace = true
 tracing.workspace = true

@@ -1533,93 +1533,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "libp2p-mini-chain-chain"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "serde",
- "tokio",
-]
-
-[[package]]
-name = "libp2p-mini-chain-cli"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "libp2p-mini-chain-chain",
- "libp2p-mini-chain-mempool",
- "libp2p-mini-chain-network",
- "libp2p-mini-chain-node",
- "libp2p-mini-chain-sync",
- "tokio",
- "tokio-util",
- "tracing",
- "tracing-subscriber",
-]
-
-[[package]]
-name = "libp2p-mini-chain-mempool"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "libp2p-mini-chain-protocol",
- "tokio",
-]
-
-[[package]]
-name = "libp2p-mini-chain-network"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "async-trait",
- "libp2p",
- "libp2p-mini-chain-chain",
- "libp2p-mini-chain-protocol",
- "sha2",
- "tokio",
- "tokio-util",
- "tracing",
-]
-
-[[package]]
-name = "libp2p-mini-chain-node"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "libp2p-mini-chain-chain",
- "libp2p-mini-chain-mempool",
- "libp2p-mini-chain-network",
- "libp2p-mini-chain-protocol",
- "libp2p-mini-chain-sync",
- "tokio",
- "tokio-util",
- "tracing",
-]
-
-[[package]]
-name = "libp2p-mini-chain-protocol"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "bincode",
- "libp2p-mini-chain-chain",
- "serde",
-]
-
-[[package]]
-name = "libp2p-mini-chain-sync"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "async-trait",
- "libp2p-mini-chain-chain",
- "libp2p-mini-chain-network",
- "libp2p-mini-chain-protocol",
- "tokio",
- "tracing",
-]
-
-[[package]]
 name = "libp2p-noise"
 version = "0.46.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2087,6 +2000,93 @@ name = "opaque-debug"
 version = "0.3.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c08d65885ee38876c4f86fa503fb49d7b507c2b62552df7c70b2fce627e06381"
+
+[[package]]
+name = "p2p-chain-lab-chain"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "serde",
+ "tokio",
+]
+
+[[package]]
+name = "p2p-chain-lab-cli"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "p2p-chain-lab-chain",
+ "p2p-chain-lab-mempool",
+ "p2p-chain-lab-network",
+ "p2p-chain-lab-node",
+ "p2p-chain-lab-sync",
+ "tokio",
+ "tokio-util",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "p2p-chain-lab-mempool"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "p2p-chain-lab-protocol",
+ "tokio",
+]
+
+[[package]]
+name = "p2p-chain-lab-network"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "libp2p",
+ "p2p-chain-lab-chain",
+ "p2p-chain-lab-protocol",
+ "sha2",
+ "tokio",
+ "tokio-util",
+ "tracing",
+]
+
+[[package]]
+name = "p2p-chain-lab-node"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "p2p-chain-lab-chain",
+ "p2p-chain-lab-mempool",
+ "p2p-chain-lab-network",
+ "p2p-chain-lab-protocol",
+ "p2p-chain-lab-sync",
+ "tokio",
+ "tokio-util",
+ "tracing",
+]
+
+[[package]]
+name = "p2p-chain-lab-protocol"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "bincode",
+ "p2p-chain-lab-chain",
+ "serde",
+]
+
+[[package]]
+name = "p2p-chain-lab-sync"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "p2p-chain-lab-chain",
+ "p2p-chain-lab-network",
+ "p2p-chain-lab-protocol",
+ "tokio",
+ "tracing",
+]
 
 [[package]]
 name = "parking"

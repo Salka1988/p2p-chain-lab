@@ -1,9 +1,9 @@
 use async_trait::async_trait;
-use libp2p_mini_chain_chain::store::BlockStorePort;
-use libp2p_mini_chain_network::{
+use p2p_chain_lab_chain::store::BlockStorePort;
+use p2p_chain_lab_network::{
     PeerId, peer_score::PeerReputationPort, service::BlockRequestPort,
 };
-use libp2p_mini_chain_protocol::messages::BlockAnnouncement;
+use p2p_chain_lab_protocol::messages::BlockAnnouncement;
 
 #[async_trait]
 pub trait SyncPort: Clone + Send + Sync + 'static {
@@ -98,11 +98,11 @@ mod tests {
     use tokio::sync::mpsc;
 
     use super::*;
-    use libp2p_mini_chain_chain::block::{Block, BlockHash};
-    use libp2p_mini_chain_chain::store::ChainStore;
-    use libp2p_mini_chain_network::command::NetworkCommand;
-    use libp2p_mini_chain_network::peer_score::PeerScoreHandle;
-    use libp2p_mini_chain_network::service::NetworkHandle;
+    use p2p_chain_lab_chain::block::{Block, BlockHash};
+    use p2p_chain_lab_chain::store::ChainStore;
+    use p2p_chain_lab_network::command::NetworkCommand;
+    use p2p_chain_lab_network::peer_score::PeerScoreHandle;
+    use p2p_chain_lab_network::service::NetworkHandle;
 
     fn announcement(hash: u8) -> BlockAnnouncement {
         BlockAnnouncement {

@@ -1,14 +1,14 @@
 use std::marker::PhantomData;
 
-use libp2p_mini_chain_chain::store::BlockStorePort;
-use libp2p_mini_chain_mempool::MempoolPort;
-use libp2p_mini_chain_network::{
+use p2p_chain_lab_chain::store::BlockStorePort;
+use p2p_chain_lab_mempool::MempoolPort;
+use p2p_chain_lab_network::{
     event::NetworkEvent,
     peer_score::PeerReputationPort,
     service::{BlockSendPort, NetworkStatusPort},
 };
-use libp2p_mini_chain_protocol::validation::validate_block;
-use libp2p_mini_chain_sync::SyncPort;
+use p2p_chain_lab_protocol::validation::validate_block;
+use p2p_chain_lab_sync::SyncPort;
 use tokio::{sync::mpsc, task::JoinHandle};
 use tokio_util::sync::CancellationToken;
 

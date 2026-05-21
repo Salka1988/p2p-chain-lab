@@ -1,4 +1,4 @@
-use libp2p_mini_chain_chain::block::{Block, BlockHash};
+use p2p_chain_lab_chain::block::{Block, BlockHash};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]

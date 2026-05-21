@@ -1,5 +1,5 @@
 [package]
-name = "libp2p-mini-chain-chain"
+name = "p2p-chain-lab-chain"
 version.workspace = true
 edition.workspace = true
 

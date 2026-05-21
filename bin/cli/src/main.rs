@@ -1,11 +1,11 @@
-use libp2p_mini_chain_chain::store::ChainStore;
-use libp2p_mini_chain_mempool::Mempool;
-use libp2p_mini_chain_network::{
+use p2p_chain_lab_chain::store::ChainStore;
+use p2p_chain_lab_mempool::Mempool;
+use p2p_chain_lab_network::{
     peer_score::{PeerScoreActor, PeerScoreHandle},
     service::{NetworkHandle, NetworkService},
 };
-use libp2p_mini_chain_node::{config::Config, node::Node};
-use libp2p_mini_chain_sync::SyncService;
+use p2p_chain_lab_node::{config::Config, node::Node};
+use p2p_chain_lab_sync::SyncService;
 use tokio_util::sync::CancellationToken;
 
 #[tokio::main]

@@ -1,9 +1,9 @@
 [package]
-name = "libp2p-mini-chain-mempool"
+name = "p2p-chain-lab-mempool"
 version.workspace = true
 edition.workspace = true
 
 [dependencies]
 async-trait.workspace = true
-libp2p-mini-chain-protocol = { path = "../protocol" }
+p2p-chain-lab-protocol = { path = "../protocol" }
 tokio.workspace = true

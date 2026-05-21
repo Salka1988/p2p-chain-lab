@@ -1,5 +1,5 @@
 [package]
-name = "libp2p-mini-chain-network"
+name = "p2p-chain-lab-network"
 version.workspace = true
 edition.workspace = true
 
@@ -7,8 +7,8 @@ edition.workspace = true
 anyhow.workspace = true
 async-trait.workspace = true
 libp2p.workspace = true
-libp2p-mini-chain-chain = { path = "../chain" }
-libp2p-mini-chain-protocol = { path = "../protocol" }
+p2p-chain-lab-chain = { path = "../chain" }
+p2p-chain-lab-protocol = { path = "../protocol" }
 sha2.workspace = true
 tokio.workspace = true
 tokio-util.workspace = true

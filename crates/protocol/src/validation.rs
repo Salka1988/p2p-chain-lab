@@ -1,4 +1,4 @@
-use libp2p_mini_chain_chain::block::Block;
+use p2p_chain_lab_chain::block::Block;
 
 use crate::messages::{BlockAnnouncement, Transaction};
 
@@ -38,7 +38,7 @@ pub fn validate_block(block: &Block) -> anyhow::Result<()> {
 mod tests {
     use super::*;
     use crate::messages::TransactionId;
-    use libp2p_mini_chain_chain::block::{Block, BlockHash};
+    use p2p_chain_lab_chain::block::{Block, BlockHash};
 
     #[test]
     fn validates_transaction_shape() {
