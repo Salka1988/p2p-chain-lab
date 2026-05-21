@@ -1,5 +1,5 @@
 [package]
-name = "p2p-chain-lab-chain"
+name = "p2p-chain-lib-chain"
 version.workspace = true
 edition.workspace = true
 

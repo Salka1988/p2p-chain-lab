@@ -1,5 +1,5 @@
-use p2p_chain_lab_chain::block::{Block, BlockHash};
-use p2p_chain_lab_protocol::messages::{BlockAnnouncement, Transaction};
+use p2p_chain_lib_chain::block::{Block, BlockHash};
+use p2p_chain_lib_protocol::messages::{BlockAnnouncement, Transaction};
 
 use crate::{PeerAddress, PeerId};
 

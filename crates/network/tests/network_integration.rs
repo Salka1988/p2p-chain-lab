@@ -1,15 +1,15 @@
 use std::{future::Future, time::Duration};
 
 use libp2p::{Multiaddr, identity::Keypair};
-use p2p_chain_lab_chain::block::{Block, BlockHash};
-use p2p_chain_lab_network::{
+use p2p_chain_lib_chain::block::{Block, BlockHash};
+use p2p_chain_lib_network::{
     PeerAddress, PeerId,
     command::NetworkCommand,
     event::NetworkEvent,
     peer_score::{PeerScoreActor, PeerScoreHandle},
     service::{NetworkConfig, NetworkService},
 };
-use p2p_chain_lab_protocol::messages::{Transaction, TransactionId};
+use p2p_chain_lib_protocol::messages::{Transaction, TransactionId};
 use sha2::{Digest, Sha256};
 use tokio::{
     sync::mpsc,

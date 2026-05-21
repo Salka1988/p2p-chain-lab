@@ -1,13 +1,13 @@
 [package]
-name = "p2p-chain-lab-sync"
+name = "p2p-chain-lib-sync"
 version.workspace = true
 edition.workspace = true
 
 [dependencies]
 anyhow.workspace = true
 async-trait.workspace = true
-p2p-chain-lab-chain = { path = "../chain" }
-p2p-chain-lab-network = { path = "../network" }
-p2p-chain-lab-protocol = { path = "../protocol" }
+p2p-chain-lib-chain = { path = "../chain" }
+p2p-chain-lib-network = { path = "../network" }
+p2p-chain-lib-protocol = { path = "../protocol" }
 tokio.workspace = true
 tracing.workspace = true

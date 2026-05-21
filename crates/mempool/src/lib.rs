@@ -1,7 +1,7 @@
 use std::{collections::HashMap, sync::Arc};
 
 use async_trait::async_trait;
-use p2p_chain_lab_protocol::messages::{Transaction, TransactionId};
+use p2p_chain_lib_protocol::messages::{Transaction, TransactionId};
 use tokio::sync::Mutex;
 
 #[async_trait]

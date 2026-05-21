@@ -5,11 +5,11 @@ use libp2p::{
     ping,
     request_response::{self, ProtocolSupport, cbor},
 };
-use p2p_chain_lab_protocol::messages::{BlockRequest, BlockResponse};
+use p2p_chain_lib_protocol::messages::{BlockRequest, BlockResponse};
 
-pub const TX_TOPIC: &str = "p2p-chain-lab/tx/1";
-pub const BLOCK_ANNOUNCEMENT_TOPIC: &str = "p2p-chain-lab/block-announcement/1";
-pub const BLOCK_REQUEST_PROTOCOL: &str = "/p2p-chain-lab/block-request/1";
+pub const TX_TOPIC: &str = "p2p-chain-lib/tx/1";
+pub const BLOCK_ANNOUNCEMENT_TOPIC: &str = "p2p-chain-lib/block-announcement/1";
+pub const BLOCK_REQUEST_PROTOCOL: &str = "/p2p-chain-lib/block-request/1";
 
 #[derive(libp2p::swarm::NetworkBehaviour)]
 pub struct NetworkBehaviour {

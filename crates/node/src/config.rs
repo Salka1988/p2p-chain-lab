@@ -1,4 +1,4 @@
-use p2p_chain_lab_network::{PeerAddress, service::NetworkConfig};
+use p2p_chain_lib_network::{PeerAddress, service::NetworkConfig};
 
 const DEFAULT_LISTEN_ADDR: &str = "/ip4/127.0.0.1/tcp/0";
 
@@ -69,7 +69,7 @@ impl Config {
     }
 
     pub fn usage() -> &'static str {
-        "usage: p2p-chain-lab-cli [--listen <addr>] [--bootstrap <addr>...] [--node-key-seed <seed>]"
+        "usage: p2p-chain-lib-cli [--listen <addr>] [--bootstrap <addr>...] [--node-key-seed <seed>]"
     }
 }
 

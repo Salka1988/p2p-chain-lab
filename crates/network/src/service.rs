@@ -6,8 +6,8 @@ use libp2p::{
     Multiaddr, Swarm, SwarmBuilder, futures::StreamExt, gossipsub, identity::Keypair, kad,
     multiaddr, request_response, swarm::SwarmEvent,
 };
-use p2p_chain_lab_chain::block::{Block, BlockHash};
-use p2p_chain_lab_protocol::{
+use p2p_chain_lib_chain::block::{Block, BlockHash};
+use p2p_chain_lib_protocol::{
     codec,
     messages::{BlockAnnouncement, BlockRequest, BlockResponse, Transaction},
 };

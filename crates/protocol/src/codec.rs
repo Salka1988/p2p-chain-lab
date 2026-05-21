@@ -20,7 +20,7 @@ mod tests {
     use crate::messages::{
         BlockAnnouncement, BlockRequest, BlockResponse, Transaction, TransactionId,
     };
-    use p2p_chain_lab_chain::block::{Block, BlockHash};
+    use p2p_chain_lib_chain::block::{Block, BlockHash};
 
     fn block(hash: u8) -> Block {
         Block {

@@ -1,15 +1,15 @@
 [package]
-name = "p2p-chain-lab-node"
+name = "p2p-chain-lib-node"
 version.workspace = true
 edition.workspace = true
 
 [dependencies]
 anyhow.workspace = true
-p2p-chain-lab-chain = { path = "../chain" }
-p2p-chain-lab-mempool = { path = "../mempool" }
-p2p-chain-lab-network = { path = "../network" }
-p2p-chain-lab-protocol = { path = "../protocol" }
-p2p-chain-lab-sync = { path = "../sync" }
+p2p-chain-lib-chain = { path = "../chain" }
+p2p-chain-lib-mempool = { path = "../mempool" }
+p2p-chain-lib-network = { path = "../network" }
+p2p-chain-lib-protocol = { path = "../protocol" }
+p2p-chain-lib-sync = { path = "../sync" }
 tokio.workspace = true
 tokio-util.workspace = true
 tracing.workspace = true

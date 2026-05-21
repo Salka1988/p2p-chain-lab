@@ -2002,7 +2002,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c08d65885ee38876c4f86fa503fb49d7b507c2b62552df7c70b2fce627e06381"
 
 [[package]]
-name = "p2p-chain-lab-chain"
+name = "p2p-chain-lib-chain"
 version = "0.1.0"
 dependencies = [
  "async-trait",
@@ -2011,15 +2011,15 @@ dependencies = [
 ]
 
 [[package]]
-name = "p2p-chain-lab-cli"
+name = "p2p-chain-lib-cli"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "p2p-chain-lab-chain",
- "p2p-chain-lab-mempool",
- "p2p-chain-lab-network",
- "p2p-chain-lab-node",
- "p2p-chain-lab-sync",
+ "p2p-chain-lib-chain",
+ "p2p-chain-lib-mempool",
+ "p2p-chain-lib-network",
+ "p2p-chain-lib-node",
+ "p2p-chain-lib-sync",
  "tokio",
  "tokio-util",
  "tracing",
@@ -2027,23 +2027,23 @@ dependencies = [
 ]
 
 [[package]]
-name = "p2p-chain-lab-mempool"
+name = "p2p-chain-lib-mempool"
 version = "0.1.0"
 dependencies = [
  "async-trait",
- "p2p-chain-lab-protocol",
+ "p2p-chain-lib-protocol",
  "tokio",
 ]
 
 [[package]]
-name = "p2p-chain-lab-network"
+name = "p2p-chain-lib-network"
 version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-trait",
  "libp2p",
- "p2p-chain-lab-chain",
- "p2p-chain-lab-protocol",
+ "p2p-chain-lib-chain",
+ "p2p-chain-lib-protocol",
  "sha2",
  "tokio",
  "tokio-util",
@@ -2051,39 +2051,39 @@ dependencies = [
 ]
 
 [[package]]
-name = "p2p-chain-lab-node"
+name = "p2p-chain-lib-node"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "p2p-chain-lab-chain",
- "p2p-chain-lab-mempool",
- "p2p-chain-lab-network",
- "p2p-chain-lab-protocol",
- "p2p-chain-lab-sync",
+ "p2p-chain-lib-chain",
+ "p2p-chain-lib-mempool",
+ "p2p-chain-lib-network",
+ "p2p-chain-lib-protocol",
+ "p2p-chain-lib-sync",
  "tokio",
  "tokio-util",
  "tracing",
 ]
 
 [[package]]
-name = "p2p-chain-lab-protocol"
+name = "p2p-chain-lib-protocol"
 version = "0.1.0"
 dependencies = [
  "anyhow",
  "bincode",
- "p2p-chain-lab-chain",
+ "p2p-chain-lib-chain",
  "serde",
 ]
 
 [[package]]
-name = "p2p-chain-lab-sync"
+name = "p2p-chain-lib-sync"
 version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-trait",
- "p2p-chain-lab-chain",
- "p2p-chain-lab-network",
- "p2p-chain-lab-protocol",
+ "p2p-chain-lib-chain",
+ "p2p-chain-lib-network",
+ "p2p-chain-lib-protocol",
  "tokio",
  "tracing",
 ]

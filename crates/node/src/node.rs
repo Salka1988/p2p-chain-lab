@@ -1,14 +1,14 @@
 use std::marker::PhantomData;
 
-use p2p_chain_lab_chain::store::BlockStorePort;
-use p2p_chain_lab_mempool::MempoolPort;
-use p2p_chain_lab_network::{
+use p2p_chain_lib_chain::store::BlockStorePort;
+use p2p_chain_lib_mempool::MempoolPort;
+use p2p_chain_lib_network::{
     event::NetworkEvent,
     peer_score::PeerReputationPort,
     service::{BlockSendPort, NetworkStatusPort},
 };
-use p2p_chain_lab_protocol::validation::validate_block;
-use p2p_chain_lab_sync::SyncPort;
+use p2p_chain_lib_protocol::validation::validate_block;
+use p2p_chain_lib_sync::SyncPort;
 use tokio::{sync::mpsc, task::JoinHandle};
 use tokio_util::sync::CancellationToken;
 
@@ -61,16 +61,8 @@ where
 
     pub async fn run(self, cancellation_token: CancellationToken) -> anyhow::Result<()> {
         tracing::info!(listen_addr = %self.network.listen_addr(), "node running");
-        tokio::select! {
-            result = tokio::signal::ctrl_c() => {
-                result?;
-                tracing::info!("shutdown signal received");
-                cancellation_token.cancel();
-            }
-            _ = cancellation_token.cancelled() => {
-                tracing::info!("node shutdown requested");
-            }
-        }
+        cancellation_token.cancelled().await;
+        tracing::info!("node shutdown requested");
 
         self.event_loop_handle.await?;
         tracing::info!("node stopped");
