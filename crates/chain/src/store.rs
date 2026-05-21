@@ -68,12 +68,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn insert_and_fetch_block() {
+    async fn insert_and_fetch_block() -> Result<(), &'static str> {
         let store = ChainStore::new();
         let block = block(1);
 
         assert!(store.insert(block.clone()).await);
-        assert_eq!(store.get(&block.hash).await.unwrap().height, 1);
+        let stored = store.get(&block.hash).await.ok_or("expected stored block")?;
+        assert_eq!(stored.height, 1);
         assert_eq!(store.len().await, 1);
+        Ok(())
     }
 }

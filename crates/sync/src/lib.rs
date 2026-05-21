@@ -119,7 +119,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn requests_missing_announced_block() {
+    async fn requests_missing_announced_block() -> anyhow::Result<()> {
         let (command_tx, mut command_rx) = mpsc::channel(4);
         let (peer_score_tx, _peer_score_rx) = mpsc::channel(4);
         let sync = SyncService::new(
@@ -129,18 +129,18 @@ mod tests {
         );
 
         sync.on_block_announcement(PeerId::from("peer-a"), announcement(1))
-            .await
-            .unwrap();
+            .await?;
 
         assert!(matches!(
             command_rx.recv().await,
             Some(NetworkCommand::RequestBlock { peer_id, block_hash })
                 if peer_id == PeerId::from("peer-a") && block_hash == BlockHash::from_u8(1)
         ));
+        Ok(())
     }
 
     #[tokio::test]
-    async fn skips_known_announced_block() {
+    async fn skips_known_announced_block() -> anyhow::Result<()> {
         let (command_tx, mut command_rx) = mpsc::channel(4);
         let (peer_score_tx, _peer_score_rx) = mpsc::channel(4);
         let store = ChainStore::new();
@@ -152,9 +152,9 @@ mod tests {
         );
 
         sync.on_block_announcement(PeerId::from("peer-a"), announcement(1))
-            .await
-            .unwrap();
+            .await?;
 
         assert!(command_rx.try_recv().is_err());
+        Ok(())
     }
 }

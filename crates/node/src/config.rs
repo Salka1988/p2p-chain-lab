@@ -114,16 +114,17 @@ mod tests {
     use super::*;
 
     #[test]
-    fn uses_defaults_without_args() {
-        let config = Config::parse_from(Vec::<String>::new()).unwrap();
+    fn uses_defaults_without_args() -> anyhow::Result<()> {
+        let config = Config::parse_from(Vec::<String>::new())?;
 
         assert_eq!(config.listen_addr.as_str(), DEFAULT_LISTEN_ADDR);
         assert!(config.bootstrap_peers.is_empty());
         assert_eq!(config.node_key_seed, None);
+        Ok(())
     }
 
     #[test]
-    fn parses_listen_and_bootstrap_values() {
+    fn parses_listen_and_bootstrap_values() -> anyhow::Result<()> {
         let config = Config::parse_from([
             "--listen",
             "/ip4/127.0.0.1/tcp/4001",
@@ -132,8 +133,7 @@ mod tests {
             "--bootstrap=/ip4/127.0.0.1/tcp/4003",
             "--node-key-seed",
             "node-a",
-        ])
-        .unwrap();
+        ])?;
 
         assert_eq!(config.listen_addr.as_str(), "/ip4/127.0.0.1/tcp/4001");
         assert_eq!(
@@ -145,26 +145,36 @@ mod tests {
             vec!["/ip4/127.0.0.1/tcp/4002", "/ip4/127.0.0.1/tcp/4003"]
         );
         assert_eq!(config.node_key_seed, Some("node-a".to_string()));
+        Ok(())
     }
 
     #[test]
-    fn parses_equals_node_key_seed() {
-        let config = Config::parse_from(["--node-key-seed=node-a"]).unwrap();
+    fn parses_equals_node_key_seed() -> anyhow::Result<()> {
+        let config = Config::parse_from(["--node-key-seed=node-a"])?;
 
         assert_eq!(config.node_key_seed, Some("node-a".to_string()));
+        Ok(())
     }
 
     #[test]
-    fn rejects_missing_flag_value() {
-        let error = Config::parse_from(["--listen"]).unwrap_err();
+    fn rejects_missing_flag_value() -> anyhow::Result<()> {
+        let error = match Config::parse_from(["--listen"]) {
+            Ok(_) => anyhow::bail!("expected --listen without value to fail"),
+            Err(error) => error,
+        };
 
         assert!(error.to_string().contains("--listen requires"));
+        Ok(())
     }
 
     #[test]
-    fn rejects_unknown_arg() {
-        let error = Config::parse_from(["--bad"]).unwrap_err();
+    fn rejects_unknown_arg() -> anyhow::Result<()> {
+        let error = match Config::parse_from(["--bad"]) {
+            Ok(_) => anyhow::bail!("expected unknown argument to fail"),
+            Err(error) => error,
+        };
 
         assert!(error.to_string().contains("unknown argument"));
+        Ok(())
     }
 }

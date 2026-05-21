@@ -194,9 +194,15 @@ impl NetworkService {
                 libp2p::yamux::Config::default,
             )?
             .with_dns()?
-            .with_behaviour(|keypair: &Keypair| {
-                NetworkBehaviour::new(keypair.clone(), keypair.public().to_peer_id())
-            })?
+            .with_behaviour(
+                |keypair: &Keypair| -> Result<
+                    NetworkBehaviour,
+                    Box<dyn std::error::Error + Send + Sync>,
+                > {
+                    NetworkBehaviour::new(keypair.clone(), keypair.public().to_peer_id())
+                        .map_err(Into::into)
+                },
+            )?
             .build();
 
         tracing::info!(%local_peer_id, "local peer id");
@@ -574,7 +580,7 @@ impl NetworkService {
 mod tests {
     use super::*;
 
-    fn service_with_seed(seed: Option<&str>) -> NetworkService {
+    fn service_with_seed(seed: Option<&str>) -> anyhow::Result<NetworkService> {
         let (_command_tx, command_rx) = mpsc::channel(4);
         let (event_tx, _event_rx) = mpsc::channel(4);
         let (peer_score_command_tx, _peer_score_command_rx) = mpsc::channel(4);
@@ -590,28 +596,25 @@ mod tests {
             PeerScoreHandle::new(peer_score_command_tx),
             peer_score_event_rx,
         )
-        .unwrap()
     }
 
     #[test]
-    fn node_key_seed_builds_stable_peer_id() {
-        let first = service_with_seed(Some("node-a"))
-            .build_identity()
-            .unwrap()
+    fn node_key_seed_builds_stable_peer_id() -> anyhow::Result<()> {
+        let first = service_with_seed(Some("node-a"))?
+            .build_identity()?
             .public()
             .to_peer_id();
-        let second = service_with_seed(Some("node-a"))
-            .build_identity()
-            .unwrap()
+        let second = service_with_seed(Some("node-a"))?
+            .build_identity()?
             .public()
             .to_peer_id();
-        let third = service_with_seed(Some("node-b"))
-            .build_identity()
-            .unwrap()
+        let third = service_with_seed(Some("node-b"))?
+            .build_identity()?
             .public()
             .to_peer_id();
 
         assert_eq!(first, second);
         assert_ne!(first, third);
+        Ok(())
     }
 }

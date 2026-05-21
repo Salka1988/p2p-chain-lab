@@ -180,7 +180,7 @@ mod tests {
     use super::*;
 
     #[tokio::test]
-    async fn emits_ban_event_when_score_crosses_threshold() {
+    async fn emits_ban_event_when_score_crosses_threshold() -> anyhow::Result<()> {
         let (command_tx, command_rx) = mpsc::channel(8);
         let (event_tx, mut event_rx) = mpsc::channel(8);
         let actor = PeerScoreActor::new(command_rx, event_tx);
@@ -192,8 +192,7 @@ mod tests {
         for _ in 0..5 {
             handle
                 .bad_message(PeerId::from("peer-a"), "invalid message")
-                .await
-                .unwrap();
+                .await?;
         }
 
         assert_eq!(
@@ -205,11 +204,12 @@ mod tests {
         );
 
         cancellation_token.cancel();
-        actor_task.await.unwrap().unwrap();
+        actor_task.await??;
+        Ok(())
     }
 
     #[tokio::test]
-    async fn emits_ban_event_only_once() {
+    async fn emits_ban_event_only_once() -> anyhow::Result<()> {
         let (command_tx, command_rx) = mpsc::channel(16);
         let (event_tx, mut event_rx) = mpsc::channel(16);
         let actor = PeerScoreActor::new(command_rx, event_tx);
@@ -221,14 +221,14 @@ mod tests {
         for _ in 0..6 {
             handle
                 .bad_message(PeerId::from("peer-a"), "invalid message")
-                .await
-                .unwrap();
+                .await?;
         }
 
         assert!(event_rx.recv().await.is_some());
         assert!(event_rx.try_recv().is_err());
 
         cancellation_token.cancel();
-        actor_task.await.unwrap().unwrap();
+        actor_task.await??;
+        Ok(())
     }
 }

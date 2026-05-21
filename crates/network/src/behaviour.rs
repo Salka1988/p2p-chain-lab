@@ -1,3 +1,4 @@
+use anyhow::Context;
 use libp2p::{
     StreamProtocol, gossipsub,
     identity::Keypair,
@@ -20,18 +21,19 @@ pub struct NetworkBehaviour {
 }
 
 impl NetworkBehaviour {
-    pub fn new(keypair: Keypair, local_peer_id: libp2p::PeerId) -> Self {
+    pub fn new(keypair: Keypair, local_peer_id: libp2p::PeerId) -> anyhow::Result<Self> {
         let mut gossipsub = gossipsub::Behaviour::new(
             gossipsub::MessageAuthenticity::Signed(keypair),
             gossipsub::Config::default(),
         )
-        .expect("gossipsub signed authentication should accept libp2p keypair");
+        .map_err(anyhow::Error::msg)
+        .context("failed to create gossipsub behaviour")?;
         gossipsub
             .subscribe(&gossipsub::IdentTopic::new(TX_TOPIC))
-            .expect("static transaction topic should be valid");
+            .context("failed to subscribe to transaction topic")?;
         gossipsub
             .subscribe(&gossipsub::IdentTopic::new(BLOCK_ANNOUNCEMENT_TOPIC))
-            .expect("static block announcement topic should be valid");
+            .context("failed to subscribe to block announcement topic")?;
 
         let block_request_response = cbor::Behaviour::new(
             [(
@@ -43,11 +45,11 @@ impl NetworkBehaviour {
 
         let kademlia = kad::Behaviour::new(local_peer_id, MemoryStore::new(local_peer_id));
 
-        Self {
+        Ok(Self {
             ping: ping::Behaviour::new(ping::Config::default()),
             kademlia,
             gossipsub,
             block_request_response,
-        }
+        })
     }
 }

@@ -32,51 +32,55 @@ mod tests {
     }
 
     #[test]
-    fn transaction_round_trips() {
+    fn transaction_round_trips() -> anyhow::Result<()> {
         let message = Transaction {
             id: TransactionId::from_u8(1),
             payload: vec![1, 2, 3],
         };
 
-        let encoded = encode(&message).unwrap();
-        let decoded: Transaction = decode(&encoded).unwrap();
+        let encoded = encode(&message)?;
+        let decoded: Transaction = decode(&encoded)?;
 
         assert_eq!(decoded, message);
+        Ok(())
     }
 
     #[test]
-    fn block_announcement_round_trips() {
+    fn block_announcement_round_trips() -> anyhow::Result<()> {
         let message = BlockAnnouncement {
             block_hash: BlockHash::from_u8(1),
             height: 1,
         };
 
-        let encoded = encode(&message).unwrap();
-        let decoded: BlockAnnouncement = decode(&encoded).unwrap();
+        let encoded = encode(&message)?;
+        let decoded: BlockAnnouncement = decode(&encoded)?;
 
         assert_eq!(decoded, message);
+        Ok(())
     }
 
     #[test]
-    fn block_request_round_trips() {
+    fn block_request_round_trips() -> anyhow::Result<()> {
         let message = BlockRequest {
             block_hash: BlockHash::from_u8(1),
         };
 
-        let encoded = encode(&message).unwrap();
-        let decoded: BlockRequest = decode(&encoded).unwrap();
+        let encoded = encode(&message)?;
+        let decoded: BlockRequest = decode(&encoded)?;
 
         assert_eq!(decoded, message);
+        Ok(())
     }
 
     #[test]
-    fn block_response_round_trips() {
+    fn block_response_round_trips() -> anyhow::Result<()> {
         let message = BlockResponse { block: block(1) };
 
-        let encoded = encode(&message).unwrap();
-        let decoded: BlockResponse = decode(&encoded).unwrap();
+        let encoded = encode(&message)?;
+        let decoded: BlockResponse = decode(&encoded)?;
 
         assert_eq!(decoded, message);
+        Ok(())
     }
 
     #[test]
