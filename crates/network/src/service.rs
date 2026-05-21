@@ -7,6 +7,7 @@ use libp2p::{
     multiaddr, request_response, swarm::SwarmEvent,
 };
 use p2p_chain_lib_chain::block::{Block, BlockHash};
+use p2p_chain_lib_ports::{BlockRequestPort, BlockSendPort, NetworkStatusPort, PeerId};
 use p2p_chain_lib_protocol::{
     codec,
     messages::{BlockAnnouncement, BlockRequest, BlockResponse, Transaction},
@@ -16,7 +17,7 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 use crate::{
-    PeerAddress, PeerId,
+    PeerAddress,
     behaviour::{BLOCK_ANNOUNCEMENT_TOPIC, NetworkBehaviour, NetworkBehaviourEvent, TX_TOPIC},
     command::NetworkCommand,
     event::NetworkEvent,
@@ -34,20 +35,6 @@ pub struct NetworkConfig {
 pub struct NetworkHandle {
     command_tx: mpsc::Sender<NetworkCommand>,
     listen_addr: PeerAddress,
-}
-
-pub trait NetworkStatusPort: Clone + Send + Sync + 'static {
-    fn listen_addr(&self) -> &str;
-}
-
-#[async_trait]
-pub trait BlockRequestPort: Clone + Send + Sync + 'static {
-    async fn request_block(&self, peer_id: PeerId, block_hash: BlockHash) -> anyhow::Result<()>;
-}
-
-#[async_trait]
-pub trait BlockSendPort: Clone + Send + Sync + 'static {
-    async fn send_block(&self, peer_id: PeerId, block: Block) -> anyhow::Result<()>;
 }
 
 impl NetworkHandle {

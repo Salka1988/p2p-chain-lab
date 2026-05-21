@@ -1,7 +1,8 @@
 use p2p_chain_lib_chain::block::{Block, BlockHash};
+use p2p_chain_lib_ports::PeerId;
 use p2p_chain_lib_protocol::messages::{BlockAnnouncement, Transaction};
 
-use crate::{PeerAddress, PeerId};
+use crate::PeerAddress;
 
 #[derive(Debug)]
 pub enum NetworkEvent {

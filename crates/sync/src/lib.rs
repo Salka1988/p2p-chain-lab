@@ -1,6 +1,6 @@
 use async_trait::async_trait;
 use p2p_chain_lib_chain::store::BlockStorePort;
-use p2p_chain_lib_network::{PeerId, peer_score::PeerReputationPort, service::BlockRequestPort};
+use p2p_chain_lib_ports::{BlockRequestPort, PeerId, PeerReputationPort};
 use p2p_chain_lib_protocol::messages::BlockAnnouncement;
 
 #[async_trait]
@@ -93,14 +93,49 @@ where
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use tokio::sync::mpsc;
 
     use super::*;
     use p2p_chain_lib_chain::block::{Block, BlockHash};
     use p2p_chain_lib_chain::store::ChainStore;
-    use p2p_chain_lib_network::command::NetworkCommand;
-    use p2p_chain_lib_network::peer_score::PeerScoreHandle;
-    use p2p_chain_lib_network::service::NetworkHandle;
+    use p2p_chain_lib_ports::PeerId;
+
+    #[derive(Clone)]
+    struct RecordingNetwork {
+        request_tx: mpsc::Sender<(PeerId, BlockHash)>,
+    }
+
+    #[async_trait]
+    impl BlockRequestPort for RecordingNetwork {
+        async fn request_block(
+            &self,
+            peer_id: PeerId,
+            block_hash: BlockHash,
+        ) -> anyhow::Result<()> {
+            self.request_tx.send((peer_id, block_hash)).await?;
+            Ok(())
+        }
+    }
+
+    #[derive(Clone, Default)]
+    struct RecordingReputation {
+        reports: Arc<tokio::sync::Mutex<Vec<(PeerId, String, bool)>>>,
+    }
+
+    #[async_trait]
+    impl PeerReputationPort for RecordingReputation {
+        async fn report_good_peer(&self, peer_id: PeerId, reason: String) -> anyhow::Result<()> {
+            self.reports.lock().await.push((peer_id, reason, true));
+            Ok(())
+        }
+
+        async fn report_bad_peer(&self, peer_id: PeerId, reason: String) -> anyhow::Result<()> {
+            self.reports.lock().await.push((peer_id, reason, false));
+            Ok(())
+        }
+    }
 
     fn announcement(hash: u8) -> BlockAnnouncement {
         BlockAnnouncement {
@@ -120,20 +155,19 @@ mod tests {
 
     #[tokio::test]
     async fn requests_missing_announced_block() -> anyhow::Result<()> {
-        let (command_tx, mut command_rx) = mpsc::channel(4);
-        let (peer_score_tx, _peer_score_rx) = mpsc::channel(4);
+        let (request_tx, mut request_rx) = mpsc::channel(4);
         let sync = SyncService::new(
-            NetworkHandle::new(command_tx),
+            RecordingNetwork { request_tx },
             ChainStore::new(),
-            PeerScoreHandle::new(peer_score_tx),
+            RecordingReputation::default(),
         );
 
         sync.on_block_announcement(PeerId::from("peer-a"), announcement(1))
             .await?;
 
         assert!(matches!(
-            command_rx.recv().await,
-            Some(NetworkCommand::RequestBlock { peer_id, block_hash })
+            request_rx.recv().await,
+            Some((peer_id, block_hash))
                 if peer_id == PeerId::from("peer-a") && block_hash == BlockHash::from_u8(1)
         ));
         Ok(())
@@ -141,20 +175,19 @@ mod tests {
 
     #[tokio::test]
     async fn skips_known_announced_block() -> anyhow::Result<()> {
-        let (command_tx, mut command_rx) = mpsc::channel(4);
-        let (peer_score_tx, _peer_score_rx) = mpsc::channel(4);
+        let (request_tx, mut request_rx) = mpsc::channel(4);
         let store = ChainStore::new();
         store.insert(block(1)).await;
         let sync = SyncService::new(
-            NetworkHandle::new(command_tx),
+            RecordingNetwork { request_tx },
             store,
-            PeerScoreHandle::new(peer_score_tx),
+            RecordingReputation::default(),
         );
 
         sync.on_block_announcement(PeerId::from("peer-a"), announcement(1))
             .await?;
 
-        assert!(command_rx.try_recv().is_err());
+        assert!(request_rx.try_recv().is_err());
         Ok(())
     }
 }

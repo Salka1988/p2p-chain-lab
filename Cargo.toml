@@ -5,6 +5,7 @@ members = [
     "crates/mempool",
     "crates/network",
     "crates/node",
+    "crates/ports",
     "crates/protocol",
     "crates/sync",
 ]

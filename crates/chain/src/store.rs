@@ -73,7 +73,10 @@ mod tests {
         let block = block(1);
 
         assert!(store.insert(block.clone()).await);
-        let stored = store.get(&block.hash).await.ok_or("expected stored block")?;
+        let stored = store
+            .get(&block.hash)
+            .await
+            .ok_or("expected stored block")?;
         assert_eq!(stored.height, 1);
         assert_eq!(store.len().await, 1);
         Ok(())

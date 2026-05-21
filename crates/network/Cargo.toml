@@ -8,6 +8,7 @@ anyhow.workspace = true
 async-trait.workspace = true
 libp2p.workspace = true
 p2p-chain-lib-chain = { path = "../chain" }
+p2p-chain-lib-ports = { path = "../ports" }
 p2p-chain-lib-protocol = { path = "../protocol" }
 sha2.workspace = true
 tokio.workspace = true

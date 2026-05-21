@@ -1,7 +1,6 @@
 use p2p_chain_lib_chain::block::{Block, BlockHash};
+use p2p_chain_lib_ports::PeerId;
 use p2p_chain_lib_protocol::messages::Transaction;
-
-use crate::PeerId;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum NetworkCommand {

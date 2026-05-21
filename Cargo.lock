@@ -2043,6 +2043,7 @@ dependencies = [
  "async-trait",
  "libp2p",
  "p2p-chain-lib-chain",
+ "p2p-chain-lib-ports",
  "p2p-chain-lib-protocol",
  "sha2",
  "tokio",
@@ -2058,11 +2059,21 @@ dependencies = [
  "p2p-chain-lib-chain",
  "p2p-chain-lib-mempool",
  "p2p-chain-lib-network",
+ "p2p-chain-lib-ports",
  "p2p-chain-lib-protocol",
  "p2p-chain-lib-sync",
  "tokio",
  "tokio-util",
  "tracing",
+]
+
+[[package]]
+name = "p2p-chain-lib-ports"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "p2p-chain-lib-chain",
 ]
 
 [[package]]
@@ -2082,7 +2093,7 @@ dependencies = [
  "anyhow",
  "async-trait",
  "p2p-chain-lib-chain",
- "p2p-chain-lib-network",
+ "p2p-chain-lib-ports",
  "p2p-chain-lib-protocol",
  "tokio",
  "tracing",

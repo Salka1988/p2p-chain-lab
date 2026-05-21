@@ -1,10 +1,9 @@
 use std::collections::{HashMap, HashSet};
 
 use async_trait::async_trait;
+use p2p_chain_lib_ports::{PeerId, PeerReputationPort};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
-
-use crate::PeerId;
 
 const DEFAULT_SCORE: i32 = 0;
 const BAD_MESSAGE_PENALTY: i32 = 10;
@@ -24,12 +23,6 @@ pub enum PeerScoreCommand {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PeerScoreEvent {
     PeerBanned { peer_id: PeerId, reason: String },
-}
-
-#[async_trait]
-pub trait PeerReputationPort: Clone + Send + Sync + 'static {
-    async fn report_good_peer(&self, peer_id: PeerId, reason: String) -> anyhow::Result<()>;
-    async fn report_bad_peer(&self, peer_id: PeerId, reason: String) -> anyhow::Result<()>;
 }
 
 #[derive(Debug, Clone)]

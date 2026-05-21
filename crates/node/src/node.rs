@@ -2,11 +2,8 @@ use std::marker::PhantomData;
 
 use p2p_chain_lib_chain::store::BlockStorePort;
 use p2p_chain_lib_mempool::MempoolPort;
-use p2p_chain_lib_network::{
-    event::NetworkEvent,
-    peer_score::PeerReputationPort,
-    service::{BlockSendPort, NetworkStatusPort},
-};
+use p2p_chain_lib_network::event::NetworkEvent;
+use p2p_chain_lib_ports::{BlockSendPort, NetworkStatusPort, PeerReputationPort};
 use p2p_chain_lib_protocol::validation::validate_block;
 use p2p_chain_lib_sync::SyncPort;
 use tokio::{sync::mpsc, task::JoinHandle};

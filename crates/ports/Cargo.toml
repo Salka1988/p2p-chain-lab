@@ -1,0 +1,9 @@
+[package]
+name = "p2p-chain-lib-ports"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+async-trait.workspace = true
+p2p-chain-lib-chain = { path = "../chain" }
