@@ -1,5 +1,6 @@
 use std::{future::Future, time::Duration};
 
+use libp2p::{Multiaddr, identity::Keypair};
 use libp2p_mini_chain_chain::block::{Block, BlockHash};
 use libp2p_mini_chain_network::{
     PeerAddress, PeerId,
@@ -9,6 +10,7 @@ use libp2p_mini_chain_network::{
     service::{NetworkConfig, NetworkService},
 };
 use libp2p_mini_chain_protocol::messages::{Transaction, TransactionId};
+use sha2::{Digest, Sha256};
 use tokio::{
     sync::mpsc,
     task::JoinHandle,
@@ -131,9 +133,12 @@ async fn with_timeout<T>(future: impl Future<Output = anyhow::Result<T>>) -> any
 }
 
 async fn connected_pair() -> anyhow::Result<(TestNetwork, TestNetwork, PeerId)> {
-    let mut first = TestNetwork::start("integration-node-a", Vec::new()).await?;
+    let first_seed = "integration-node-a";
+    let mut first = TestNetwork::start(first_seed, Vec::new()).await?;
     let first_addr = first.listening_addr().await?;
-    let mut second = TestNetwork::start("integration-node-b", vec![first_addr]).await?;
+    let first_peer_id = deterministic_peer_id(first_seed)?;
+    let first_bootstrap_addr = with_peer_id(first_addr, first_peer_id)?;
+    let mut second = TestNetwork::start("integration-node-b", vec![first_bootstrap_addr]).await?;
 
     let first_peer_id = second
         .wait_for_event(|event| match event {
@@ -150,6 +155,21 @@ async fn connected_pair() -> anyhow::Result<(TestNetwork, TestNetwork, PeerId)> 
         .await?;
 
     Ok((first, second, first_peer_id))
+}
+
+fn deterministic_peer_id(seed: &str) -> anyhow::Result<libp2p::PeerId> {
+    let secret_key = Sha256::digest(seed.as_bytes());
+    Ok(Keypair::ed25519_from_bytes(secret_key.to_vec())?
+        .public()
+        .to_peer_id())
+}
+
+fn with_peer_id(address: PeerAddress, peer_id: libp2p::PeerId) -> anyhow::Result<PeerAddress> {
+    let address: Multiaddr = address.as_str().parse()?;
+    let address = address
+        .with_p2p(peer_id)
+        .map_err(|address| anyhow::anyhow!("address already has different peer id: {address}"))?;
+    Ok(PeerAddress::from(address.to_string()))
 }
 
 fn tx(id: u8) -> Transaction {

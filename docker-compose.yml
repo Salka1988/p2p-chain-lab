@@ -19,7 +19,7 @@ services:
       - --node-key-seed
       - node-a
       - --bootstrap
-      - /dns4/bootstrap/tcp/4001
+      - /dns4/bootstrap/tcp/4001/p2p/12D3KooWKMdREvv5abosMqhavxYWBwAjvGfmrnLP6i4yZvSDBRHS
     depends_on:
       - bootstrap
     environment:
@@ -33,7 +33,7 @@ services:
       - --node-key-seed
       - node-b
       - --bootstrap
-      - /dns4/bootstrap/tcp/4001
+      - /dns4/bootstrap/tcp/4001/p2p/12D3KooWKMdREvv5abosMqhavxYWBwAjvGfmrnLP6i4yZvSDBRHS
     depends_on:
       - bootstrap
     environment:

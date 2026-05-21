@@ -162,6 +162,9 @@ where
                             NetworkEvent::PeerDisconnected(peer_id) => {
                                 tracing::info!(%peer_id, "peer disconnected");
                             }
+                            NetworkEvent::PeerDiscovered(peer_id) => {
+                                tracing::info!(%peer_id, "peer discovered");
+                            }
                             NetworkEvent::PeerMisbehaved { peer_id, reason } => {
                                 tracing::warn!(%peer_id, %reason, "peer misbehaved");
                             }

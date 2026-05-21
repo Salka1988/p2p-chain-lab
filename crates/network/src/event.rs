@@ -24,6 +24,7 @@ pub enum NetworkEvent {
     },
     PeerConnected(PeerId),
     PeerDisconnected(PeerId),
+    PeerDiscovered(PeerId),
     PeerMisbehaved {
         peer_id: PeerId,
         reason: String,

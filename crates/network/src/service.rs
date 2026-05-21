@@ -3,8 +3,8 @@ use std::collections::HashMap;
 use anyhow::Context;
 use async_trait::async_trait;
 use libp2p::{
-    Multiaddr, Swarm, SwarmBuilder, futures::StreamExt, gossipsub, identity::Keypair, multiaddr,
-    request_response, swarm::SwarmEvent,
+    Multiaddr, Swarm, SwarmBuilder, futures::StreamExt, gossipsub, identity::Keypair, kad,
+    multiaddr, request_response, swarm::SwarmEvent,
 };
 use libp2p_mini_chain_chain::block::{Block, BlockHash};
 use libp2p_mini_chain_protocol::{
@@ -207,13 +207,21 @@ impl NetworkService {
                 .as_str()
                 .parse()
                 .with_context(|| format!("invalid bootstrap peer address: {peer}"))?;
-            if let Some(peer_id) = Self::peer_id_from_addr(&peer_addr) {
-                swarm
-                    .behaviour_mut()
-                    .kademlia
-                    .add_address(&peer_id, peer_addr.clone());
-            }
+            let peer_id = Self::peer_id_from_addr(&peer_addr).with_context(|| {
+                format!("bootstrap peer address must include /p2p/<peer-id>: {peer}")
+            })?;
+            swarm
+                .behaviour_mut()
+                .kademlia
+                .add_address(&peer_id, peer_addr.clone());
             swarm.dial(peer_addr)?;
+        }
+
+        if !self.config.bootstrap_peers.is_empty() {
+            match swarm.behaviour_mut().kademlia.bootstrap() {
+                Ok(query_id) => tracing::info!(?query_id, "kademlia bootstrap started"),
+                Err(error) => tracing::warn!(?error, "kademlia bootstrap could not start"),
+            }
         }
 
         Ok(swarm)
@@ -351,9 +359,71 @@ impl NetworkService {
                 tracing::debug!(?event, "ping event");
             }
             SwarmEvent::Behaviour(NetworkBehaviourEvent::Kademlia(event)) => {
-                tracing::debug!(?event, "kademlia event");
+                self.handle_kademlia_event(event).await?;
             }
             _ => {}
+        }
+
+        Ok(())
+    }
+
+    async fn handle_kademlia_event(&self, event: kad::Event) -> anyhow::Result<()> {
+        match event {
+            kad::Event::RoutingUpdated {
+                peer,
+                is_new_peer,
+                addresses,
+                old_peer,
+                ..
+            } => {
+                let peer_id = PeerId::from(peer.to_string());
+                tracing::info!(
+                    %peer_id,
+                    is_new_peer,
+                    address_count = addresses.iter().count(),
+                    ?old_peer,
+                    "kademlia routing updated"
+                );
+                self.event_tx
+                    .send(NetworkEvent::PeerDiscovered(peer_id))
+                    .await?;
+            }
+            kad::Event::OutboundQueryProgressed {
+                result: kad::QueryResult::Bootstrap(result),
+                step,
+                ..
+            } => match result {
+                Ok(ok) => {
+                    tracing::info!(
+                        peer_id = %ok.peer,
+                        num_remaining = ok.num_remaining,
+                        step = step.count.get(),
+                        last = step.last,
+                        "kademlia bootstrap progressed"
+                    );
+                }
+                Err(error) => {
+                    tracing::warn!(?error, "kademlia bootstrap failed");
+                }
+            },
+            kad::Event::RoutablePeer { peer, address } => {
+                tracing::debug!(peer_id = %peer, %address, "kademlia peer routable");
+            }
+            kad::Event::PendingRoutablePeer { peer, address } => {
+                tracing::debug!(peer_id = %peer, %address, "kademlia peer pending routable");
+            }
+            kad::Event::UnroutablePeer { peer } => {
+                tracing::debug!(peer_id = %peer, "kademlia peer unroutable");
+            }
+            kad::Event::ModeChanged { new_mode } => {
+                tracing::debug!(?new_mode, "kademlia mode changed");
+            }
+            kad::Event::OutboundQueryProgressed { result, .. } => {
+                tracing::debug!(?result, "kademlia query progressed");
+            }
+            kad::Event::InboundRequest { request } => {
+                tracing::debug!(?request, "kademlia inbound request");
+            }
         }
 
         Ok(())
