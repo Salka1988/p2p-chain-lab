@@ -1,5 +1,7 @@
 mod task_group;
 
+use std::time::Duration;
+
 use crate::task_group::TaskGroup;
 use p2p_chain_lib_chain::store::ChainStore;
 use p2p_chain_lib_mempool::Mempool;
@@ -15,7 +17,7 @@ async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt::init();
 
     let config = Config::from_args()?;
-    let mut task_group = TaskGroup::new();
+    let mut task_group = TaskGroup::new().with_shutdown_timeout(Duration::from_secs(5));
     let (network_command_tx, network_command_rx) = tokio::sync::mpsc::channel(1024);
     let (network_event_tx, network_event_rx) = tokio::sync::mpsc::channel(1024);
     let (peer_score_command_tx, peer_score_command_rx) = tokio::sync::mpsc::channel(1024);

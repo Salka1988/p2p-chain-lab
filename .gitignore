@@ -31,3 +31,6 @@ Thumbs.db
 # Local Codex/plugin workspace state
 /.agents/
 /.codex-plugins/
+
+# Local handoff notes
+/HANDOFF_SUMMARY.md

@@ -1,10 +1,13 @@
-use std::future::Future;
+use std::{future::Future, time::Duration};
 
-use tokio::task::JoinSet;
+use tokio::{task::JoinSet, time::timeout};
 use tokio_util::sync::CancellationToken;
+
+const DEFAULT_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
 
 pub struct TaskGroup {
     cancellation_token: CancellationToken,
+    shutdown_timeout: Duration,
     tasks: JoinSet<TaskResult>,
 }
 
@@ -17,8 +20,14 @@ impl TaskGroup {
     pub fn new() -> Self {
         Self {
             cancellation_token: CancellationToken::new(),
+            shutdown_timeout: DEFAULT_SHUTDOWN_TIMEOUT,
             tasks: JoinSet::new(),
         }
+    }
+
+    pub fn with_shutdown_timeout(mut self, shutdown_timeout: Duration) -> Self {
+        self.shutdown_timeout = shutdown_timeout;
+        self
     }
 
     pub fn child_token(&self) -> CancellationToken {
@@ -39,7 +48,7 @@ impl TaskGroup {
     }
 
     pub async fn wait(mut self) -> anyhow::Result<()> {
-        let result = tokio::select! {
+        let first_exit = tokio::select! {
             signal = tokio::signal::ctrl_c() => {
                 signal?;
                 tracing::info!("shutdown signal received");
@@ -52,19 +61,24 @@ impl TaskGroup {
             }
         };
 
-        let mut error = match result {
+        let mut error = match first_exit {
             Some(Ok(name)) => Some(anyhow::anyhow!("{name} stopped unexpectedly")),
             Some(Err(error)) => Some(error),
             None => None,
         };
 
-        while let Some(result) = self.tasks.join_next().await {
-            match Self::task_result(Some(result))? {
-                Ok(_) => {}
-                Err(task_error) => {
-                    if error.is_none() {
-                        error = Some(task_error);
-                    }
+        match timeout(self.shutdown_timeout, self.join_remaining(&mut error)).await {
+            Ok(result) => result?,
+            Err(_) => {
+                self.tasks.abort_all();
+                let timeout_error = anyhow::anyhow!(
+                    "shutdown timed out after {:?}; aborted remaining tasks",
+                    self.shutdown_timeout
+                );
+                if error.is_none() {
+                    error = Some(timeout_error);
+                } else {
+                    tracing::warn!(?timeout_error);
                 }
             }
         }
@@ -74,6 +88,22 @@ impl TaskGroup {
         } else {
             Ok(())
         }
+    }
+
+    async fn join_remaining(&mut self, error: &mut Option<anyhow::Error>) -> anyhow::Result<()> {
+        while let Some(result) = self.tasks.join_next().await {
+            match Self::task_result(Some(result))? {
+                Ok(name) => tracing::debug!(task = name, "task stopped"),
+                Err(task_error) => {
+                    tracing::warn!(?task_error, "task stopped with error");
+                    if error.is_none() {
+                        *error = Some(task_error);
+                    }
+                }
+            }
+        }
+
+        Ok(())
     }
 
     fn task_result(
