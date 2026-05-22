@@ -75,11 +75,10 @@ impl TaskGroup {
                     "shutdown timed out after {:?}; aborted remaining tasks",
                     self.shutdown_timeout
                 );
-                if error.is_none() {
-                    error = Some(timeout_error);
-                } else {
-                    tracing::warn!(?timeout_error);
-                }
+                error = Some(match error {
+                    Some(error) => error.context(timeout_error.to_string()),
+                    None => timeout_error,
+                });
             }
         }
 
@@ -118,5 +117,47 @@ impl TaskGroup {
             Ok(()) => Ok(Ok(task_result.name)),
             Err(error) => Ok(Err(error.context(format!("{} failed", task_result.name)))),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::{Duration, Instant};
+
+    use super::*;
+
+    #[tokio::test]
+    async fn reports_timeout_when_remaining_task_ignores_shutdown() -> Result<(), &'static str> {
+        let mut task_group = TaskGroup::new().with_shutdown_timeout(Duration::from_millis(20));
+        task_group.spawn("fast task", async { Ok(()) });
+        task_group.spawn("stuck task", async {
+            std::future::pending::<anyhow::Result<()>>().await
+        });
+
+        let started_at = Instant::now();
+        let error = task_group
+            .wait()
+            .await
+            .err()
+            .ok_or("expected task group to fail")?;
+
+        assert!(started_at.elapsed() >= Duration::from_millis(20));
+        assert!(error.to_string().contains("shutdown timed out after"));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn reports_task_failure() -> Result<(), &'static str> {
+        let mut task_group = TaskGroup::new().with_shutdown_timeout(Duration::from_millis(20));
+        task_group.spawn("failing task", async { anyhow::bail!("boom") });
+
+        let error = task_group
+            .wait()
+            .await
+            .err()
+            .ok_or("expected task group to fail")?;
+
+        assert!(error.to_string().contains("failing task failed"));
+        Ok(())
     }
 }
