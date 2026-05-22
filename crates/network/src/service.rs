@@ -7,7 +7,9 @@ use libp2p::{
     multiaddr, request_response, swarm::SwarmEvent,
 };
 use p2p_chain_lib_chain::block::{Block, BlockHash};
-use p2p_chain_lib_ports::{BlockRequestPort, BlockSendPort, NetworkStatusPort, PeerId};
+use p2p_chain_lib_ports::{
+    BlockRequestPort, BlockSendPort, NetworkEvent, NetworkStatusPort, PeerId,
+};
 use p2p_chain_lib_protocol::{
     codec,
     messages::{BlockAnnouncement, BlockRequest, BlockResponse, Transaction},
@@ -20,9 +22,10 @@ use crate::{
     PeerAddress,
     behaviour::{BLOCK_ANNOUNCEMENT_TOPIC, NetworkBehaviour, NetworkBehaviourEvent, TX_TOPIC},
     command::NetworkCommand,
-    event::NetworkEvent,
     peer_score::{PeerScoreEvent, PeerScoreHandle},
 };
+
+const DEFAULT_COMMAND_BUFFER: usize = 1024;
 
 #[derive(Debug, Clone)]
 pub struct NetworkConfig {
@@ -38,11 +41,7 @@ pub struct NetworkHandle {
 }
 
 impl NetworkHandle {
-    pub fn new(command_tx: mpsc::Sender<NetworkCommand>) -> Self {
-        Self::with_listen_addr(command_tx, PeerAddress::from("/ip4/127.0.0.1/tcp/0"))
-    }
-
-    pub fn with_listen_addr(
+    fn with_listen_addr(
         command_tx: mpsc::Sender<NetworkCommand>,
         listen_addr: PeerAddress,
     ) -> Self {
@@ -56,9 +55,34 @@ impl NetworkHandle {
         self.listen_addr.as_str()
     }
 
-    pub async fn send(&self, command: NetworkCommand) -> anyhow::Result<()> {
+    async fn send(&self, command: NetworkCommand) -> anyhow::Result<()> {
         self.command_tx.send(command).await?;
         Ok(())
+    }
+
+    pub async fn broadcast_transaction(&self, tx: Transaction) -> anyhow::Result<()> {
+        self.send(NetworkCommand::BroadcastTransaction(tx)).await
+    }
+
+    pub async fn broadcast_block(&self, block: Block) -> anyhow::Result<()> {
+        self.send(NetworkCommand::BroadcastBlock(block)).await
+    }
+
+    pub async fn request_block(
+        &self,
+        peer_id: PeerId,
+        block_hash: BlockHash,
+    ) -> anyhow::Result<()> {
+        self.send(NetworkCommand::RequestBlock {
+            peer_id,
+            block_hash,
+        })
+        .await
+    }
+
+    pub async fn send_block(&self, peer_id: PeerId, block: Block) -> anyhow::Result<()> {
+        self.send(NetworkCommand::SendBlock { peer_id, block })
+            .await
     }
 }
 
@@ -71,19 +95,14 @@ impl NetworkStatusPort for NetworkHandle {
 #[async_trait]
 impl BlockRequestPort for NetworkHandle {
     async fn request_block(&self, peer_id: PeerId, block_hash: BlockHash) -> anyhow::Result<()> {
-        self.send(NetworkCommand::RequestBlock {
-            peer_id,
-            block_hash,
-        })
-        .await
+        self.request_block(peer_id, block_hash).await
     }
 }
 
 #[async_trait]
 impl BlockSendPort for NetworkHandle {
     async fn send_block(&self, peer_id: PeerId, block: Block) -> anyhow::Result<()> {
-        self.send(NetworkCommand::SendBlock { peer_id, block })
-            .await
+        self.send_block(peer_id, block).await
     }
 }
 
@@ -100,18 +119,21 @@ type BlockResponseChannel = request_response::ResponseChannel<BlockResponse>;
 impl NetworkService {
     pub fn new(
         config: NetworkConfig,
-        command_rx: mpsc::Receiver<NetworkCommand>,
         event_tx: mpsc::Sender<NetworkEvent>,
         peer_score: PeerScoreHandle,
         peer_score_event_rx: mpsc::Receiver<PeerScoreEvent>,
-    ) -> anyhow::Result<Self> {
-        Ok(Self {
+    ) -> anyhow::Result<(Self, NetworkHandle)> {
+        let (command_tx, command_rx) = mpsc::channel(DEFAULT_COMMAND_BUFFER);
+        let handle = NetworkHandle::with_listen_addr(command_tx, config.listen_addr.clone());
+        let service = Self {
             config,
             command_rx,
             event_tx,
             peer_score,
             peer_score_event_rx,
-        })
+        };
+
+        Ok((service, handle))
     }
 
     pub async fn run(mut self, cancellation_token: CancellationToken) -> anyhow::Result<()> {
@@ -568,21 +590,21 @@ mod tests {
     use super::*;
 
     fn service_with_seed(seed: Option<&str>) -> anyhow::Result<NetworkService> {
-        let (_command_tx, command_rx) = mpsc::channel(4);
         let (event_tx, _event_rx) = mpsc::channel(4);
         let (peer_score_command_tx, _peer_score_command_rx) = mpsc::channel(4);
         let (_peer_score_event_tx, peer_score_event_rx) = mpsc::channel(4);
-        NetworkService::new(
+        let (service, _handle) = NetworkService::new(
             NetworkConfig {
                 listen_addr: PeerAddress::from("/ip4/127.0.0.1/tcp/0"),
                 bootstrap_peers: Vec::new(),
                 node_key_seed: seed.map(ToOwned::to_owned),
             },
-            command_rx,
             event_tx,
             PeerScoreHandle::new(peer_score_command_tx),
             peer_score_event_rx,
-        )
+        )?;
+
+        Ok(service)
     }
 
     #[test]

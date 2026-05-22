@@ -1,4 +1,4 @@
-use p2p_chain_lib_network::{PeerAddress, service::NetworkConfig};
+use p2p_chain_lib_ports::PeerAddress;
 
 const DEFAULT_LISTEN_ADDR: &str = "/ip4/127.0.0.1/tcp/0";
 
@@ -79,16 +79,6 @@ impl Default for Config {
             listen_addr: PeerAddress::from(DEFAULT_LISTEN_ADDR),
             bootstrap_peers: Vec::new(),
             node_key_seed: None,
-        }
-    }
-}
-
-impl From<Config> for NetworkConfig {
-    fn from(config: Config) -> Self {
-        Self {
-            listen_addr: config.listen_addr,
-            bootstrap_peers: config.bootstrap_peers,
-            node_key_seed: config.node_key_seed,
         }
     }
 }

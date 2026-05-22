@@ -7,3 +7,4 @@ edition.workspace = true
 anyhow.workspace = true
 async-trait.workspace = true
 p2p-chain-lib-chain = { path = "../chain" }
+p2p-chain-lib-protocol = { path = "../protocol" }

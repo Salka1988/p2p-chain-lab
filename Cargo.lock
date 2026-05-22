@@ -2058,7 +2058,6 @@ dependencies = [
  "anyhow",
  "p2p-chain-lib-chain",
  "p2p-chain-lib-mempool",
- "p2p-chain-lib-network",
  "p2p-chain-lib-ports",
  "p2p-chain-lib-protocol",
  "p2p-chain-lib-sync",
@@ -2074,6 +2073,7 @@ dependencies = [
  "anyhow",
  "async-trait",
  "p2p-chain-lib-chain",
+ "p2p-chain-lib-protocol",
 ]
 
 [[package]]

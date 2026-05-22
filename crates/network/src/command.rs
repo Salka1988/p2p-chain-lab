@@ -3,7 +3,7 @@ use p2p_chain_lib_ports::PeerId;
 use p2p_chain_lib_protocol::messages::Transaction;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum NetworkCommand {
+pub(crate) enum NetworkCommand {
     BroadcastTransaction(Transaction),
     RequestBlock {
         peer_id: PeerId,

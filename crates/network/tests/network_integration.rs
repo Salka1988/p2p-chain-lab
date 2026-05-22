@@ -4,11 +4,10 @@ use libp2p::{Multiaddr, identity::Keypair};
 use p2p_chain_lib_chain::block::{Block, BlockHash};
 use p2p_chain_lib_network::{
     PeerAddress, PeerId,
-    command::NetworkCommand,
-    event::NetworkEvent,
     peer_score::{PeerScoreActor, PeerScoreHandle},
-    service::{NetworkConfig, NetworkService},
+    service::{NetworkConfig, NetworkHandle, NetworkService},
 };
+use p2p_chain_lib_ports::NetworkEvent;
 use p2p_chain_lib_protocol::messages::{Transaction, TransactionId};
 use sha2::{Digest, Sha256};
 use tokio::{
@@ -21,7 +20,7 @@ use tokio_util::sync::CancellationToken;
 const TEST_TIMEOUT: Duration = Duration::from_secs(10);
 
 struct TestNetwork {
-    command_tx: mpsc::Sender<NetworkCommand>,
+    handle: NetworkHandle,
     event_rx: mpsc::Receiver<NetworkEvent>,
     cancellation_token: CancellationToken,
     network_task: JoinHandle<anyhow::Result<()>>,
@@ -30,7 +29,6 @@ struct TestNetwork {
 
 impl TestNetwork {
     async fn start(name: &str, bootstrap_peers: Vec<PeerAddress>) -> anyhow::Result<Self> {
-        let (command_tx, command_rx) = mpsc::channel(64);
         let (event_tx, event_rx) = mpsc::channel(64);
         let (peer_score_command_tx, peer_score_command_rx) = mpsc::channel(64);
         let (peer_score_event_tx, peer_score_event_rx) = mpsc::channel(64);
@@ -46,13 +44,12 @@ impl TestNetwork {
             })
         };
 
-        let service = NetworkService::new(
+        let (service, handle) = NetworkService::new(
             NetworkConfig {
                 listen_addr: PeerAddress::from("/ip4/127.0.0.1/tcp/0"),
                 bootstrap_peers,
                 node_key_seed: Some(name.to_string()),
             },
-            command_rx,
             event_tx,
             peer_score,
             peer_score_event_rx,
@@ -70,7 +67,7 @@ impl TestNetwork {
         };
 
         Ok(Self {
-            command_tx,
+            handle,
             event_rx,
             cancellation_token,
             network_task,
@@ -205,11 +202,7 @@ async fn transaction_broadcast_reaches_connected_peer() -> anyhow::Result<()> {
     let expected = tx(7);
 
     repeat_until_event(
-        || {
-            first
-                .command_tx
-                .send(NetworkCommand::BroadcastTransaction(expected.clone()))
-        },
+        || first.handle.broadcast_transaction(expected.clone()),
         &mut second,
         |event| match event {
             NetworkEvent::TransactionReceived { tx, .. } if tx == expected => Some(()),
@@ -230,11 +223,7 @@ async fn block_announcement_reaches_connected_peer() -> anyhow::Result<()> {
     let expected_hash = block.hash.clone();
 
     repeat_until_event(
-        || {
-            first
-                .command_tx
-                .send(NetworkCommand::BroadcastBlock(block.clone()))
-        },
+        || first.handle.broadcast_block(block.clone()),
         &mut second,
         |event| match event {
             NetworkEvent::BlockAnnouncementReceived { announcement, .. }
@@ -258,11 +247,8 @@ async fn request_response_fetches_block_from_connected_peer() -> anyhow::Result<
     let expected = block(11, 5);
 
     second
-        .command_tx
-        .send(NetworkCommand::RequestBlock {
-            peer_id: first_peer_id.clone(),
-            block_hash: expected.hash.clone(),
-        })
+        .handle
+        .request_block(first_peer_id.clone(), expected.hash.clone())
         .await?;
 
     let request_peer_id = first
@@ -276,11 +262,8 @@ async fn request_response_fetches_block_from_connected_peer() -> anyhow::Result<
         .await?;
 
     first
-        .command_tx
-        .send(NetworkCommand::SendBlock {
-            peer_id: request_peer_id,
-            block: expected.clone(),
-        })
+        .handle
+        .send_block(request_peer_id, expected.clone())
         .await?;
 
     let received = second
@@ -304,7 +287,7 @@ async fn repeat_until_event<T, S, Fut, F>(
 ) -> anyhow::Result<T>
 where
     S: FnMut() -> Fut,
-    Fut: Future<Output = Result<(), mpsc::error::SendError<NetworkCommand>>>,
+    Fut: Future<Output = anyhow::Result<()>>,
     F: FnMut(NetworkEvent) -> Option<T>,
 {
     with_timeout(async {

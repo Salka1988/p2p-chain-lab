@@ -1,39 +1,6 @@
-pub mod behaviour;
-pub mod command;
-pub mod event;
+mod behaviour;
+mod command;
 pub mod peer_score;
 pub mod service;
 
-pub use p2p_chain_lib_ports::PeerId;
-use std::fmt;
-
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct PeerAddress(String);
-
-impl PeerAddress {
-    pub fn new(value: impl Into<String>) -> Self {
-        Self(value.into())
-    }
-
-    pub fn as_str(&self) -> &str {
-        &self.0
-    }
-}
-
-impl fmt::Display for PeerAddress {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str(&self.0)
-    }
-}
-
-impl From<String> for PeerAddress {
-    fn from(value: String) -> Self {
-        Self::new(value)
-    }
-}
-
-impl From<&str> for PeerAddress {
-    fn from(value: &str) -> Self {
-        Self::new(value)
-    }
-}
+pub use p2p_chain_lib_ports::{PeerAddress, PeerId};

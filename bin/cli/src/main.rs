@@ -7,7 +7,7 @@ use p2p_chain_lib_chain::store::ChainStore;
 use p2p_chain_lib_mempool::Mempool;
 use p2p_chain_lib_network::{
     peer_score::{PeerScoreActor, PeerScoreHandle},
-    service::{NetworkHandle, NetworkService},
+    service::{NetworkConfig, NetworkService},
 };
 use p2p_chain_lib_node::{config::Config, node::Node};
 use p2p_chain_lib_sync::SyncService;
@@ -17,25 +17,27 @@ async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt::init();
 
     let config = Config::from_args()?;
+    let network_config = NetworkConfig {
+        listen_addr: config.listen_addr.clone(),
+        bootstrap_peers: config.bootstrap_peers.clone(),
+        node_key_seed: config.node_key_seed.clone(),
+    };
     let mut task_group = TaskGroup::new().with_shutdown_timeout(Duration::from_secs(5));
-    let (network_command_tx, network_command_rx) = tokio::sync::mpsc::channel(1024);
     let (network_event_tx, network_event_rx) = tokio::sync::mpsc::channel(1024);
     let (peer_score_command_tx, peer_score_command_rx) = tokio::sync::mpsc::channel(1024);
     let (peer_score_event_tx, peer_score_event_rx) = tokio::sync::mpsc::channel(1024);
 
-    let network = NetworkHandle::with_listen_addr(network_command_tx, config.listen_addr.clone());
     let peer_score = PeerScoreHandle::new(peer_score_command_tx);
     let chain_store = ChainStore::new();
     let mempool = Mempool::new();
-    let sync_service = SyncService::new(network.clone(), chain_store.clone(), peer_score.clone());
 
-    let network_service = NetworkService::new(
-        config.into(),
-        network_command_rx,
+    let (network_service, network) = NetworkService::new(
+        network_config,
         network_event_tx,
         peer_score.clone(),
         peer_score_event_rx,
     )?;
+    let sync_service = SyncService::new(network.clone(), chain_store.clone(), peer_score.clone());
     let network_cancellation_token = task_group.child_token();
     let peer_score_cancellation_token = task_group.child_token();
     let node_cancellation_token = task_group.child_token();
