@@ -1,3 +1,5 @@
+use std::time::Duration;
+
 use p2p_chain_lib_ports::PeerAddress;
 
 const DEFAULT_LISTEN_ADDR: &str = "/ip4/127.0.0.1/tcp/0";
@@ -7,6 +9,7 @@ pub struct Config {
     pub listen_addr: PeerAddress,
     pub bootstrap_peers: Vec<PeerAddress>,
     pub node_key_seed: Option<String>,
+    pub block_production_interval: Option<Duration>,
 }
 
 impl Config {
@@ -35,6 +38,12 @@ impl Config {
                 "--node-key-seed" => {
                     config.node_key_seed = Some(next_value(&mut args, "--node-key-seed")?);
                 }
+                "--produce-block-interval-ms" => {
+                    config.block_production_interval = Some(parse_duration_ms(next_value(
+                        &mut args,
+                        "--produce-block-interval-ms",
+                    )?)?);
+                }
                 "--help" | "-h" => {
                     anyhow::bail!("{}", Self::usage());
                 }
@@ -48,6 +57,12 @@ impl Config {
                 }
                 _ if arg.starts_with("--node-key-seed=") => {
                     config.node_key_seed = Some(split_value(&arg, "--node-key-seed=")?);
+                }
+                _ if arg.starts_with("--produce-block-interval-ms=") => {
+                    config.block_production_interval = Some(parse_duration_ms(split_value(
+                        &arg,
+                        "--produce-block-interval-ms=",
+                    )?)?);
                 }
                 _ => anyhow::bail!("unknown argument: {arg}\n\n{}", Self::usage()),
             }
@@ -69,7 +84,7 @@ impl Config {
     }
 
     pub fn usage() -> &'static str {
-        "usage: p2p-chain-lib-cli [--listen <addr>] [--bootstrap <addr>...] [--node-key-seed <seed>]"
+        "usage: p2p-chain-lib-cli [--listen <addr>] [--bootstrap <addr>...] [--node-key-seed <seed>] [--produce-block-interval-ms <ms>]"
     }
 }
 
@@ -79,6 +94,7 @@ impl Default for Config {
             listen_addr: PeerAddress::from(DEFAULT_LISTEN_ADDR),
             bootstrap_peers: Vec::new(),
             node_key_seed: None,
+            block_production_interval: None,
         }
     }
 }
@@ -97,6 +113,17 @@ fn split_value(arg: &str, prefix: &str) -> anyhow::Result<String> {
     anyhow::ensure!(!value.is_empty(), "{prefix} requires a non-empty value");
 
     Ok(value.to_string())
+}
+
+fn parse_duration_ms(value: String) -> anyhow::Result<Duration> {
+    let milliseconds: u64 = value
+        .parse()
+        .map_err(|_| anyhow::anyhow!("--produce-block-interval-ms requires a positive integer"))?;
+    anyhow::ensure!(
+        milliseconds > 0,
+        "--produce-block-interval-ms requires a positive integer"
+    );
+    Ok(Duration::from_millis(milliseconds))
 }
 
 #[cfg(test)]
@@ -143,6 +170,17 @@ mod tests {
         let config = Config::parse_from(["--node-key-seed=node-a"])?;
 
         assert_eq!(config.node_key_seed, Some("node-a".to_string()));
+        Ok(())
+    }
+
+    #[test]
+    fn parses_block_production_interval() -> anyhow::Result<()> {
+        let config = Config::parse_from(["--produce-block-interval-ms=250"])?;
+
+        assert_eq!(
+            config.block_production_interval,
+            Some(Duration::from_millis(250))
+        );
         Ok(())
     }
 

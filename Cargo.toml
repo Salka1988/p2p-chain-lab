@@ -2,6 +2,7 @@
 members = [
     "bin/cli",
     "crates/chain",
+    "crates/consensus",
     "crates/mempool",
     "crates/network",
     "crates/node",

@@ -6,10 +6,10 @@ edition.workspace = true
 [dependencies]
 anyhow.workspace = true
 p2p-chain-lib-chain = { path = "../chain" }
+p2p-chain-lib-consensus = { path = "../consensus" }
 p2p-chain-lib-mempool = { path = "../mempool" }
 p2p-chain-lib-ports = { path = "../ports" }
 p2p-chain-lib-protocol = { path = "../protocol" }
-p2p-chain-lib-sync = { path = "../sync" }
 tokio.workspace = true
 tokio-util.workspace = true
 tracing.workspace = true

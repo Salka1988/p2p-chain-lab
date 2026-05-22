@@ -4,19 +4,24 @@ use std::time::Duration;
 
 use crate::task_group::TaskGroup;
 use p2p_chain_lib_chain::store::ChainStore;
+use p2p_chain_lib_consensus::SimpleConsensus;
 use p2p_chain_lib_mempool::Mempool;
 use p2p_chain_lib_network::{
     peer_score::{PeerScoreActor, PeerScoreHandle},
     service::{NetworkConfig, NetworkService},
 };
 use p2p_chain_lib_node::{config::Config, node::Node};
-use p2p_chain_lib_sync::SyncService;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt::init();
 
     let config = Config::from_args()?;
+    let block_production_interval = config.block_production_interval;
+    let consensus_node_id = config
+        .node_key_seed
+        .clone()
+        .unwrap_or_else(|| config.listen_addr.as_str().to_string());
     let network_config = NetworkConfig {
         listen_addr: config.listen_addr.clone(),
         bootstrap_peers: config.bootstrap_peers.clone(),
@@ -37,7 +42,7 @@ async fn main() -> anyhow::Result<()> {
         peer_score.clone(),
         peer_score_event_rx,
     )?;
-    let sync_service = SyncService::new(network.clone(), chain_store.clone(), peer_score.clone());
+    let consensus = SimpleConsensus::new(consensus_node_id, chain_store.clone());
     let network_cancellation_token = task_group.child_token();
     let peer_score_cancellation_token = task_group.child_token();
     let node_cancellation_token = task_group.child_token();
@@ -55,9 +60,10 @@ async fn main() -> anyhow::Result<()> {
         network,
         chain_store,
         mempool,
-        sync_service,
+        consensus,
         peer_score,
         network_event_rx,
+        block_production_interval,
         node_cancellation_token.clone(),
     );
 

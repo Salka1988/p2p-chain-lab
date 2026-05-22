@@ -109,6 +109,11 @@ pub trait BlockSendPort: Clone + Send + Sync + 'static {
 }
 
 #[async_trait]
+pub trait BlockBroadcastPort: Clone + Send + Sync + 'static {
+    async fn broadcast_block(&self, block: Block) -> anyhow::Result<()>;
+}
+
+#[async_trait]
 pub trait PeerReputationPort: Clone + Send + Sync + 'static {
     async fn report_good_peer(&self, peer_id: PeerId, reason: String) -> anyhow::Result<()>;
     async fn report_bad_peer(&self, peer_id: PeerId, reason: String) -> anyhow::Result<()>;

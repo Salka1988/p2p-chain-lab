@@ -8,7 +8,7 @@ use libp2p::{
 };
 use p2p_chain_lib_chain::block::{Block, BlockHash};
 use p2p_chain_lib_ports::{
-    BlockRequestPort, BlockSendPort, NetworkEvent, NetworkStatusPort, PeerId,
+    BlockBroadcastPort, BlockRequestPort, BlockSendPort, NetworkEvent, NetworkStatusPort, PeerId,
 };
 use p2p_chain_lib_protocol::{
     codec,
@@ -103,6 +103,13 @@ impl BlockRequestPort for NetworkHandle {
 impl BlockSendPort for NetworkHandle {
     async fn send_block(&self, peer_id: PeerId, block: Block) -> anyhow::Result<()> {
         self.send_block(peer_id, block).await
+    }
+}
+
+#[async_trait]
+impl BlockBroadcastPort for NetworkHandle {
+    async fn broadcast_block(&self, block: Block) -> anyhow::Result<()> {
+        self.broadcast_block(block).await
     }
 }
 
@@ -222,13 +229,17 @@ impl NetworkService {
                 .as_str()
                 .parse()
                 .with_context(|| format!("invalid bootstrap peer address: {peer}"))?;
-            let peer_id = Self::peer_id_from_addr(&peer_addr).with_context(|| {
-                format!("bootstrap peer address must include /p2p/<peer-id>: {peer}")
-            })?;
-            swarm
-                .behaviour_mut()
-                .kademlia
-                .add_address(&peer_id, peer_addr.clone());
+            if let Some(peer_id) = Self::peer_id_from_addr(&peer_addr) {
+                swarm
+                    .behaviour_mut()
+                    .kademlia
+                    .add_address(&peer_id, peer_addr.clone());
+            } else {
+                tracing::debug!(
+                    %peer,
+                    "bootstrap peer address has no /p2p/<peer-id>; dialing without kademlia address registration"
+                );
+            }
             swarm.dial(peer_addr)?;
         }
 
