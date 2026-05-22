@@ -10,7 +10,10 @@ use p2p_chain_lib_network::{
     peer_score::{PeerScoreActor, PeerScoreHandle},
     service::{NetworkConfig, NetworkService},
 };
-use p2p_chain_lib_node::{config::Config, node::Node};
+use p2p_chain_lib_node::{
+    config::Config,
+    node::{Node, NodeRuntime},
+};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -56,16 +59,16 @@ async fn main() -> anyhow::Result<()> {
             .await
     });
 
-    let node = Node::new(
+    let node = Node::new(NodeRuntime {
         network,
         chain_store,
         mempool,
         consensus,
-        peer_score,
+        peer_reputation: peer_score,
         network_event_rx,
         block_production_interval,
-        node_cancellation_token.clone(),
-    );
+        cancellation_token: node_cancellation_token.clone(),
+    });
 
     task_group.spawn(
         "node",

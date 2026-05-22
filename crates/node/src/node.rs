@@ -23,6 +23,17 @@ where
     _ports: PhantomData<(C, M, K, R)>,
 }
 
+pub struct NodeRuntime<N, C, M, K, R> {
+    pub network: N,
+    pub chain_store: C,
+    pub mempool: M,
+    pub consensus: K,
+    pub peer_reputation: R,
+    pub network_event_rx: mpsc::Receiver<NetworkEvent>,
+    pub block_production_interval: Option<Duration>,
+    pub cancellation_token: CancellationToken,
+}
+
 impl<N, C, M, K, R> Node<N, C, M, K, R>
 where
     N: NetworkStatusPort + BlockRequestPort + BlockSendPort + BlockBroadcastPort,
@@ -31,26 +42,18 @@ where
     K: ConsensusPort,
     R: PeerReputationPort,
 {
-    pub fn new(
-        network: N,
-        chain_store: C,
-        mempool: M,
-        consensus: K,
-        peer_reputation: R,
-        network_event_rx: mpsc::Receiver<NetworkEvent>,
-        block_production_interval: Option<Duration>,
-        cancellation_token: CancellationToken,
-    ) -> Self {
-        let event_loop_handle = Self::spawn_event_loop(
-            chain_store,
-            mempool,
-            network.clone(),
-            consensus,
-            peer_reputation,
-            network_event_rx,
-            block_production_interval,
-            cancellation_token.child_token(),
-        );
+    pub fn new(runtime: NodeRuntime<N, C, M, K, R>) -> Self {
+        let network = runtime.network.clone();
+        let event_loop_handle = Self::spawn_event_loop(NodeRuntime {
+            network: runtime.network,
+            chain_store: runtime.chain_store,
+            mempool: runtime.mempool,
+            consensus: runtime.consensus,
+            peer_reputation: runtime.peer_reputation,
+            network_event_rx: runtime.network_event_rx,
+            block_production_interval: runtime.block_production_interval,
+            cancellation_token: runtime.cancellation_token.child_token(),
+        });
 
         Self {
             network,
@@ -69,21 +72,14 @@ where
         Ok(())
     }
 
-    fn spawn_event_loop(
-        chain_store: C,
-        mempool: M,
-        network: N,
-        consensus: K,
-        peer_reputation: R,
-        mut network_event_rx: tokio::sync::mpsc::Receiver<NetworkEvent>,
-        block_production_interval: Option<Duration>,
-        cancellation_token: CancellationToken,
-    ) -> JoinHandle<()> {
+    fn spawn_event_loop(runtime: NodeRuntime<N, C, M, K, R>) -> JoinHandle<()> {
         tokio::spawn(async move {
-            let mut block_production_ticker = block_production_interval.map(tokio::time::interval);
+            let mut block_production_ticker =
+                runtime.block_production_interval.map(tokio::time::interval);
+            let mut network_event_rx = runtime.network_event_rx;
             loop {
                 tokio::select! {
-                    _ = cancellation_token.cancelled() => {
+                    _ = runtime.cancellation_token.cancelled() => {
                         tracing::info!("node event loop shutdown requested");
                         break;
                     }
@@ -96,10 +92,10 @@ where
                         }
                     } => {
                         if let Err(error) = Self::handle_consensus_event(
-                            &chain_store,
-                            &network,
-                            &peer_reputation,
-                            &consensus,
+                            &runtime.chain_store,
+                            &runtime.network,
+                            &runtime.peer_reputation,
+                            &runtime.consensus,
                             ConsensusEvent::Tick,
                         ).await {
                             tracing::warn!(?error, "failed to handle consensus tick");
@@ -116,7 +112,7 @@ where
                             }
                             NetworkEvent::TransactionReceived { peer_id, tx } => {
                                 tracing::info!(%peer_id, ?tx, "transaction received");
-                                let inserted = mempool.insert_transaction(tx).await;
+                                let inserted = runtime.mempool.insert_transaction(tx).await;
                                 tracing::debug!(inserted, "transaction mempool insert finished");
                             }
                             NetworkEvent::BlockAnnouncementReceived {
@@ -125,10 +121,10 @@ where
                             } => {
                                 tracing::info!(%peer_id, ?announcement, "block announcement received");
                                 if let Err(error) = Self::handle_consensus_event(
-                                    &chain_store,
-                                    &network,
-                                    &peer_reputation,
-                                    &consensus,
+                                    &runtime.chain_store,
+                                    &runtime.network,
+                                    &runtime.peer_reputation,
+                                    &runtime.consensus,
                                     ConsensusEvent::BlockAnnouncement { peer_id, announcement },
                                 ).await {
                                     tracing::warn!(?error, "failed to handle block announcement through consensus");
@@ -137,10 +133,10 @@ where
                             NetworkEvent::BlockReceived { peer_id, block } => {
                                 tracing::info!(%peer_id, ?block, "block received");
                                 if let Err(error) = Self::handle_consensus_event(
-                                    &chain_store,
-                                    &network,
-                                    &peer_reputation,
-                                    &consensus,
+                                    &runtime.chain_store,
+                                    &runtime.network,
+                                    &runtime.peer_reputation,
+                                    &runtime.consensus,
                                     ConsensusEvent::BlockReceived { peer_id, block },
                                 ).await {
                                     tracing::warn!(?error, "failed to handle received block through consensus");
@@ -148,9 +144,9 @@ where
                             }
                             NetworkEvent::BlockRequestReceived { peer_id, block_hash } => {
                                 tracing::info!(%peer_id, ?block_hash, "block request received");
-                                match chain_store.get_block(&block_hash).await {
+                                match runtime.chain_store.get_block(&block_hash).await {
                                     Some(block) => {
-                                        if let Err(error) = network.send_block(peer_id, block).await {
+                                        if let Err(error) = runtime.network.send_block(peer_id, block).await {
                                             tracing::warn!(?error, "failed to send requested block");
                                         }
                                     }
