@@ -1,40 +1,83 @@
 services:
   bootstrap:
     build: .
+    init: true
     command:
       - --listen
       - /ip4/0.0.0.0/tcp/4001
       - --node-key-seed
       - bootstrap
+      - --produce-block-interval-ms
+      - "5000"
     ports:
       - "4001:4001"
     environment:
-      RUST_LOG: debug
+      RUST_LOG: info
 
   node-a:
     build: .
+    init: true
     command:
       - --listen
       - /ip4/0.0.0.0/tcp/4001
       - --node-key-seed
       - node-a
+      - --produce-block-interval-ms
+      - "5000"
       - --bootstrap
-      - /dns4/bootstrap/tcp/4001/p2p/12D3KooWKMdREvv5abosMqhavxYWBwAjvGfmrnLP6i4yZvSDBRHS
+      - /dns4/bootstrap/tcp/4001
     depends_on:
       - bootstrap
     environment:
-      RUST_LOG: debug
+      RUST_LOG: info
 
   node-b:
     build: .
+    init: true
     command:
       - --listen
       - /ip4/0.0.0.0/tcp/4001
       - --node-key-seed
       - node-b
+      - --produce-block-interval-ms
+      - "5000"
       - --bootstrap
-      - /dns4/bootstrap/tcp/4001/p2p/12D3KooWKMdREvv5abosMqhavxYWBwAjvGfmrnLP6i4yZvSDBRHS
+      - /dns4/bootstrap/tcp/4001
     depends_on:
       - bootstrap
     environment:
-      RUST_LOG: debug
+      RUST_LOG: info
+
+  node-c:
+    build: .
+    init: true
+    command:
+      - --listen
+      - /ip4/0.0.0.0/tcp/4001
+      - --node-key-seed
+      - node-c
+      - --produce-block-interval-ms
+      - "5000"
+      - --bootstrap
+      - /dns4/bootstrap/tcp/4001
+    depends_on:
+      - bootstrap
+    environment:
+      RUST_LOG: info
+
+  node-d:
+    build: .
+    init: true
+    command:
+      - --listen
+      - /ip4/0.0.0.0/tcp/4001
+      - --node-key-seed
+      - node-d
+      - --produce-block-interval-ms
+      - "5000"
+      - --bootstrap
+      - /dns4/bootstrap/tcp/4001
+    depends_on:
+      - bootstrap
+    environment:
+      RUST_LOG: info
