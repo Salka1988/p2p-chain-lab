@@ -10,6 +10,7 @@ p2p-chain-lib-consensus = { path = "../../crates/consensus" }
 p2p-chain-lib-mempool = { path = "../../crates/mempool" }
 p2p-chain-lib-network = { path = "../../crates/network" }
 p2p-chain-lib-node = { path = "../../crates/node" }
+p2p-chain-lib-sync = { path = "../../crates/sync" }
 tokio.workspace = true
 tokio-util.workspace = true
 tracing.workspace = true

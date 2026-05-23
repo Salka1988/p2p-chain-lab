@@ -1,3 +1,5 @@
+use std::fmt;
+
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -22,6 +24,16 @@ impl BlockHash {
 
     pub fn as_bytes(&self) -> &[u8; 32] {
         &self.0
+    }
+}
+
+impl fmt::Display for BlockHash {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        for byte in self.0 {
+            write!(formatter, "{byte:02x}")?;
+        }
+
+        Ok(())
     }
 }
 

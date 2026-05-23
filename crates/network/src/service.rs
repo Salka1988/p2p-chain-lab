@@ -1,10 +1,18 @@
-use std::collections::HashMap;
+use std::{
+    collections::{BTreeSet, HashMap},
+    time::Duration,
+};
 
 use anyhow::Context;
 use async_trait::async_trait;
 use libp2p::{
-    Multiaddr, Swarm, SwarmBuilder, futures::StreamExt, gossipsub, identity::Keypair, kad,
-    multiaddr, request_response, swarm::SwarmEvent,
+    Multiaddr, Swarm, SwarmBuilder,
+    futures::StreamExt,
+    gossipsub, identify,
+    identity::Keypair,
+    kad::{self, Quorum},
+    multiaddr, request_response,
+    swarm::SwarmEvent,
 };
 use p2p_chain_lib_chain::block::{Block, BlockHash};
 use p2p_chain_lib_ports::{
@@ -32,6 +40,8 @@ pub struct NetworkConfig {
     pub listen_addr: PeerAddress,
     pub bootstrap_peers: Vec<PeerAddress>,
     pub node_key_seed: Option<String>,
+    pub validator_id: Option<String>,
+    pub validators: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -146,6 +156,12 @@ impl NetworkService {
     pub async fn run(mut self, cancellation_token: CancellationToken) -> anyhow::Result<()> {
         let mut swarm = self.build_swarm().await?;
         let mut pending_block_responses = HashMap::new();
+        let mut local_validator_addresses = BTreeSet::new();
+        let mut pending_validator_lookups = HashMap::new();
+        let mut discovery_ticker = tokio::time::interval_at(
+            tokio::time::Instant::now() + Duration::from_secs(30),
+            Duration::from_secs(30),
+        );
 
         tracing::info!(
             listen_addr = %self.config.listen_addr,
@@ -174,6 +190,8 @@ impl NetworkService {
                     self.handle_swarm_event(
                         &mut swarm,
                         &mut pending_block_responses,
+                        &mut local_validator_addresses,
+                        &mut pending_validator_lookups,
                         event,
                     ).await?;
                 }
@@ -182,6 +200,14 @@ impl NetworkService {
                         Some(event) => self.handle_peer_score_event(&mut swarm, event).await?,
                         None => break,
                     }
+                }
+                _ = discovery_ticker.tick() => {
+                    self.trigger_random_walk(&mut swarm).await?;
+                    self.refresh_validator_directory(
+                        &mut swarm,
+                        &local_validator_addresses,
+                        &mut pending_validator_lookups,
+                    ).await?;
                 }
             }
         }
@@ -313,7 +339,11 @@ impl NetworkService {
                 let Some(channel) =
                     pending_block_responses.remove(&(peer_id.clone(), block.hash.clone()))
                 else {
-                    tracing::warn!(%peer_id, block_hash = ?block.hash, "no pending block response channel");
+                    tracing::warn!(
+                        %peer_id,
+                        block_hash = %block.hash,
+                        "no pending block response channel",
+                    );
                     return Ok(());
                 };
 
@@ -336,18 +366,32 @@ impl NetworkService {
         &self,
         swarm: &mut Swarm<NetworkBehaviour>,
         pending_block_responses: &mut HashMap<(PeerId, BlockHash), BlockResponseChannel>,
+        local_validator_addresses: &mut BTreeSet<String>,
+        pending_validator_lookups: &mut HashMap<kad::QueryId, String>,
         event: SwarmEvent<NetworkBehaviourEvent>,
     ) -> anyhow::Result<()> {
         match event {
             SwarmEvent::NewListenAddr { address, .. } => {
                 tracing::info!(%address, "network listening");
+                if self.track_local_validator_address(local_validator_addresses, &address) {
+                    self.publish_validator_record(swarm, local_validator_addresses)
+                        .await?;
+                }
                 self.event_tx
                     .send(NetworkEvent::Listening(PeerAddress::from(
                         address.to_string(),
                     )))
                     .await?;
             }
-            SwarmEvent::ConnectionEstablished { peer_id, .. } => {
+            SwarmEvent::ConnectionEstablished {
+                peer_id, endpoint, ..
+            } => {
+                let address = endpoint.get_remote_address().clone();
+                swarm.add_peer_address(peer_id, address.clone());
+                swarm
+                    .behaviour_mut()
+                    .kademlia
+                    .add_address(&peer_id, address);
                 let peer_id = PeerId::from(peer_id.to_string());
                 self.peer_score.connected(peer_id.clone()).await?;
                 self.event_tx
@@ -377,6 +421,9 @@ impl NetworkService {
             SwarmEvent::Behaviour(NetworkBehaviourEvent::Gossipsub(event)) => {
                 self.handle_gossipsub_event(event).await?;
             }
+            SwarmEvent::Behaviour(NetworkBehaviourEvent::Identify(event)) => {
+                self.handle_identify_event(swarm, event).await?;
+            }
             SwarmEvent::Behaviour(NetworkBehaviourEvent::BlockRequestResponse(event)) => {
                 self.handle_block_request_response_event(swarm, pending_block_responses, event)
                     .await?;
@@ -385,7 +432,8 @@ impl NetworkService {
                 tracing::debug!(?event, "ping event");
             }
             SwarmEvent::Behaviour(NetworkBehaviourEvent::Kademlia(event)) => {
-                self.handle_kademlia_event(event).await?;
+                self.handle_kademlia_event(swarm, event, pending_validator_lookups)
+                    .await?;
             }
             _ => {}
         }
@@ -393,7 +441,55 @@ impl NetworkService {
         Ok(())
     }
 
-    async fn handle_kademlia_event(&self, event: kad::Event) -> anyhow::Result<()> {
+    async fn handle_identify_event(
+        &self,
+        swarm: &mut Swarm<NetworkBehaviour>,
+        event: identify::Event,
+    ) -> anyhow::Result<()> {
+        match event {
+            identify::Event::Received {
+                peer_id,
+                connection_id: _,
+                info,
+            } => {
+                let peer_id_str = PeerId::from(peer_id.to_string());
+                tracing::info!(
+                    %peer_id_str,
+                    address_count = info.listen_addrs.len(),
+                    "identify received"
+                );
+                for address in info.listen_addrs {
+                    swarm.add_peer_address(peer_id, address.clone());
+                    swarm
+                        .behaviour_mut()
+                        .kademlia
+                        .add_address(&peer_id, address);
+                }
+            }
+            identify::Event::Sent { peer_id, .. } => {
+                tracing::debug!(peer_id = %peer_id, "identify sent");
+            }
+            identify::Event::Pushed { peer_id, info, .. } => {
+                tracing::debug!(
+                    peer_id = %peer_id,
+                    address_count = info.listen_addrs.len(),
+                    "identify pushed"
+                );
+            }
+            identify::Event::Error { peer_id, error, .. } => {
+                tracing::warn!(peer_id = %peer_id, ?error, "identify error");
+            }
+        }
+
+        Ok(())
+    }
+
+    async fn handle_kademlia_event(
+        &self,
+        swarm: &mut Swarm<NetworkBehaviour>,
+        event: kad::Event,
+        pending_validator_lookups: &mut HashMap<kad::QueryId, String>,
+    ) -> anyhow::Result<()> {
         match event {
             kad::Event::RoutingUpdated {
                 peer,
@@ -415,6 +511,7 @@ impl NetworkService {
                     .await?;
             }
             kad::Event::OutboundQueryProgressed {
+                id: _,
                 result: kad::QueryResult::Bootstrap(result),
                 step,
                 ..
@@ -430,6 +527,83 @@ impl NetworkService {
                 }
                 Err(error) => {
                     tracing::warn!(?error, "kademlia bootstrap failed");
+                }
+            },
+            kad::Event::OutboundQueryProgressed {
+                id: _,
+                result: kad::QueryResult::PutRecord(result),
+                ..
+            } => match result {
+                Ok(ok) => {
+                    let key = Self::validator_id_from_record_key(&ok.key)
+                        .unwrap_or_else(|| String::from_utf8_lossy(ok.key.as_ref()).to_string());
+                    tracing::info!(validator_id = %key, "validator record published");
+                }
+                Err(error) => {
+                    tracing::warn!(?error, "validator record publish failed");
+                }
+            },
+            kad::Event::OutboundQueryProgressed {
+                id,
+                result: kad::QueryResult::GetRecord(result),
+                ..
+            } => match result {
+                Ok(kad::GetRecordOk::FoundRecord(record)) => {
+                    let validator_id = pending_validator_lookups.remove(&id).unwrap_or_else(|| {
+                        Self::validator_id_from_record_key(&record.record.key).unwrap_or_else(
+                            || String::from_utf8_lossy(record.record.key.as_ref()).to_string(),
+                        )
+                    });
+                    self.handle_validator_record_lookup(swarm, &validator_id, record.record.value)
+                        .await?;
+                }
+                Ok(kad::GetRecordOk::FinishedWithNoAdditionalRecord { .. }) => {
+                    if let Some(validator_id) = pending_validator_lookups.remove(&id) {
+                        tracing::debug!(validator_id = %validator_id, "validator record lookup finished");
+                    } else {
+                        tracing::debug!("validator record lookup finished");
+                    }
+                }
+                Err(error) => {
+                    let validator_id = pending_validator_lookups.remove(&id).unwrap_or_else(|| {
+                        Self::validator_id_from_record_key(error.key()).unwrap_or_else(|| {
+                            String::from_utf8_lossy(error.key().as_ref()).to_string()
+                        })
+                    });
+                    tracing::debug!(validator_id = %validator_id, ?error, "validator record lookup failed");
+                }
+            },
+            kad::Event::OutboundQueryProgressed {
+                id: _,
+                result: kad::QueryResult::GetClosestPeers(result),
+                ..
+            } => match result {
+                Ok(ok) => {
+                    tracing::info!(peer_count = ok.peers.len(), "kademlia closest peers");
+                    for peer in ok.peers {
+                        let peer_id = peer.peer_id;
+                        for address in peer.addrs {
+                            swarm.add_peer_address(peer_id, address.clone());
+                            swarm
+                                .behaviour_mut()
+                                .kademlia
+                                .add_address(&peer_id, address);
+                        }
+
+                        if !swarm.is_connected(&peer_id) {
+                            match swarm.dial(peer_id) {
+                                Ok(()) => {
+                                    tracing::debug!(peer_id = %peer_id, "dial discovered peer");
+                                }
+                                Err(error) => {
+                                    tracing::debug!(peer_id = %peer_id, ?error, "failed to dial discovered peer");
+                                }
+                            }
+                        }
+                    }
+                }
+                Err(error) => {
+                    tracing::warn!(?error, "kademlia closest peers lookup failed");
                 }
             },
             kad::Event::RoutablePeer { peer, address } => {
@@ -453,6 +627,162 @@ impl NetworkService {
         }
 
         Ok(())
+    }
+
+    async fn trigger_random_walk(&self, swarm: &mut Swarm<NetworkBehaviour>) -> anyhow::Result<()> {
+        let query_id = swarm
+            .behaviour_mut()
+            .kademlia
+            .get_closest_peers(libp2p::identity::PeerId::random());
+        tracing::debug!(?query_id, "kademlia random walk started");
+        Ok(())
+    }
+
+    async fn publish_validator_record(
+        &self,
+        swarm: &mut Swarm<NetworkBehaviour>,
+        local_validator_addresses: &BTreeSet<String>,
+    ) -> anyhow::Result<()> {
+        let Some(validator_id) = &self.config.validator_id else {
+            return Ok(());
+        };
+
+        if local_validator_addresses.is_empty() {
+            return Ok(());
+        }
+
+        let addresses = local_validator_addresses
+            .iter()
+            .filter_map(|addr| addr.parse().ok())
+            .collect::<Vec<Multiaddr>>();
+
+        if addresses.is_empty() {
+            return Ok(());
+        }
+
+        let record = crate::validator_directory::ValidatorRecord::new(
+            validator_id.clone(),
+            *swarm.local_peer_id(),
+            addresses,
+        );
+        let value = crate::validator_directory::encode_record(&record)?;
+        let record = kad::Record::new(crate::validator_directory::record_key(validator_id), value);
+        match swarm
+            .behaviour_mut()
+            .kademlia
+            .put_record(record, Quorum::One)
+        {
+            Ok(query_id) => {
+                tracing::debug!(?query_id, validator_id = %validator_id, "validator record publish started");
+            }
+            Err(error) => {
+                tracing::warn!(validator_id = %validator_id, ?error, "validator record publish failed to start");
+            }
+        }
+
+        Ok(())
+    }
+
+    async fn refresh_validator_directory(
+        &self,
+        swarm: &mut Swarm<NetworkBehaviour>,
+        local_validator_addresses: &BTreeSet<String>,
+        pending_validator_lookups: &mut HashMap<kad::QueryId, String>,
+    ) -> anyhow::Result<()> {
+        self.publish_validator_record(swarm, local_validator_addresses)
+            .await?;
+
+        for validator_id in self.remote_validator_ids() {
+            if pending_validator_lookups
+                .values()
+                .any(|pending| pending == &validator_id)
+            {
+                continue;
+            }
+
+            let query_id = swarm
+                .behaviour_mut()
+                .kademlia
+                .get_record(crate::validator_directory::record_key(&validator_id));
+            pending_validator_lookups.insert(query_id, validator_id.clone());
+            tracing::debug!(
+                ?query_id,
+                validator_id = %validator_id,
+                "validator record lookup started"
+            );
+        }
+
+        Ok(())
+    }
+
+    async fn handle_validator_record_lookup(
+        &self,
+        swarm: &mut Swarm<NetworkBehaviour>,
+        validator_id: &str,
+        value: Vec<u8>,
+    ) -> anyhow::Result<()> {
+        let record = crate::validator_directory::decode_record(&value)
+            .with_context(|| format!("invalid validator record for {validator_id}"))?;
+
+        let peer_id: libp2p::PeerId = record
+            .peer_id
+            .parse()
+            .with_context(|| format!("invalid peer id in validator record for {validator_id}"))?;
+
+        tracing::info!(
+            validator_id = %validator_id,
+            peer_id = %peer_id,
+            address_count = record.listen_addrs.len(),
+            "validator record received"
+        );
+
+        for address in record.listen_addrs {
+            let address: Multiaddr = address
+                .parse()
+                .with_context(|| format!("invalid validator address for {validator_id}"))?;
+            swarm.add_peer_address(peer_id, address.clone());
+            swarm
+                .behaviour_mut()
+                .kademlia
+                .add_address(&peer_id, address);
+        }
+
+        if !swarm.is_connected(&peer_id) {
+            match swarm.dial(peer_id) {
+                Ok(()) => {
+                    tracing::debug!(validator_id = %validator_id, peer_id = %peer_id, "dial validator from dht record");
+                }
+                Err(error) => {
+                    tracing::debug!(validator_id = %validator_id, peer_id = %peer_id, ?error, "failed to dial validator from dht record");
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    fn remote_validator_ids(&self) -> impl Iterator<Item = String> + '_ {
+        self.config
+            .validators
+            .iter()
+            .filter(|validator_id| {
+                Some(validator_id.as_str()) != self.config.validator_id.as_deref()
+            })
+            .cloned()
+    }
+
+    fn track_local_validator_address(
+        &self,
+        local_validator_addresses: &mut BTreeSet<String>,
+        address: &Multiaddr,
+    ) -> bool {
+        local_validator_addresses.insert(address.to_string())
+    }
+
+    fn validator_id_from_record_key(key: &kad::RecordKey) -> Option<String> {
+        let key = std::str::from_utf8(key.as_ref()).ok()?;
+        key.strip_prefix(crate::validator_directory::VALIDATOR_RECORD_PREFIX)
+            .map(ToOwned::to_owned)
     }
 
     async fn handle_peer_score_event(
@@ -487,7 +817,8 @@ impl NetworkService {
             return Ok(());
         };
 
-        let peer_id = PeerId::from(propagation_source.to_string());
+        let message_source = message.source.unwrap_or(propagation_source);
+        let peer_id = PeerId::from(message_source.to_string());
         if message.topic == gossipsub::IdentTopic::new(TX_TOPIC).hash() {
             let tx = match codec::decode::<Transaction>(&message.data) {
                 Ok(tx) => tx,
@@ -609,6 +940,8 @@ mod tests {
                 listen_addr: PeerAddress::from("/ip4/127.0.0.1/tcp/0"),
                 bootstrap_peers: Vec::new(),
                 node_key_seed: seed.map(ToOwned::to_owned),
+                validator_id: None,
+                validators: Vec::new(),
             },
             event_tx,
             PeerScoreHandle::new(peer_score_command_tx),

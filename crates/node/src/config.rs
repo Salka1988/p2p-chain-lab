@@ -10,6 +10,7 @@ pub struct Config {
     pub bootstrap_peers: Vec<PeerAddress>,
     pub node_key_seed: Option<String>,
     pub block_production_interval: Option<Duration>,
+    pub validators: Vec<String>,
 }
 
 impl Config {
@@ -38,6 +39,11 @@ impl Config {
                 "--node-key-seed" => {
                     config.node_key_seed = Some(next_value(&mut args, "--node-key-seed")?);
                 }
+                "--validator" => {
+                    config
+                        .validators
+                        .push(next_value(&mut args, "--validator")?);
+                }
                 "--produce-block-interval-ms" => {
                     config.block_production_interval = Some(parse_duration_ms(next_value(
                         &mut args,
@@ -57,6 +63,9 @@ impl Config {
                 }
                 _ if arg.starts_with("--node-key-seed=") => {
                     config.node_key_seed = Some(split_value(&arg, "--node-key-seed=")?);
+                }
+                _ if arg.starts_with("--validator=") => {
+                    config.validators.push(split_value(&arg, "--validator=")?);
                 }
                 _ if arg.starts_with("--produce-block-interval-ms=") => {
                     config.block_production_interval = Some(parse_duration_ms(split_value(
@@ -79,12 +88,19 @@ impl Config {
                 .all(|peer| !peer.as_str().is_empty()),
             "bootstrap peer cannot be empty"
         );
+        anyhow::ensure!(
+            config
+                .validators
+                .iter()
+                .all(|validator| !validator.is_empty()),
+            "validator cannot be empty"
+        );
 
         Ok(config)
     }
 
     pub fn usage() -> &'static str {
-        "usage: p2p-chain-lib-cli [--listen <addr>] [--bootstrap <addr>...] [--node-key-seed <seed>] [--produce-block-interval-ms <ms>]"
+        "usage: p2p-chain-lib-cli [--listen <addr>] [--bootstrap <addr>...] [--node-key-seed <seed>] [--validator <id>...] [--produce-block-interval-ms <ms>]"
     }
 }
 
@@ -95,6 +111,7 @@ impl Default for Config {
             bootstrap_peers: Vec::new(),
             node_key_seed: None,
             block_production_interval: None,
+            validators: Vec::new(),
         }
     }
 }
@@ -150,6 +167,9 @@ mod tests {
             "--bootstrap=/ip4/127.0.0.1/tcp/4003",
             "--node-key-seed",
             "node-a",
+            "--validator",
+            "node-a",
+            "--validator=node-b",
         ])?;
 
         assert_eq!(config.listen_addr.as_str(), "/ip4/127.0.0.1/tcp/4001");
@@ -162,6 +182,7 @@ mod tests {
             vec!["/ip4/127.0.0.1/tcp/4002", "/ip4/127.0.0.1/tcp/4003"]
         );
         assert_eq!(config.node_key_seed, Some("node-a".to_string()));
+        assert_eq!(config.validators, vec!["node-a", "node-b"]);
         Ok(())
     }
 

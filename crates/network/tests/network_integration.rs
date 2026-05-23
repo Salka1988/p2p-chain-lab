@@ -49,6 +49,8 @@ impl TestNetwork {
                 listen_addr: PeerAddress::from("/ip4/127.0.0.1/tcp/0"),
                 bootstrap_peers,
                 node_key_seed: Some(name.to_string()),
+                validator_id: None,
+                validators: Vec::new(),
             },
             event_tx,
             peer_score,

@@ -1,7 +1,13 @@
+use std::{collections::HashSet, sync::Arc};
+
 use async_trait::async_trait;
+use p2p_chain_lib_chain::block::BlockHash;
 use p2p_chain_lib_chain::store::BlockStorePort;
 use p2p_chain_lib_ports::{BlockRequestPort, PeerId, PeerReputationPort};
-use p2p_chain_lib_protocol::messages::BlockAnnouncement;
+use p2p_chain_lib_protocol::{
+    messages::BlockAnnouncement, validation::validate_block_announcement,
+};
+use tokio::sync::Mutex;
 
 #[async_trait]
 pub trait SyncPort: Clone + Send + Sync + 'static {
@@ -10,6 +16,8 @@ pub trait SyncPort: Clone + Send + Sync + 'static {
         peer_id: PeerId,
         announcement: BlockAnnouncement,
     ) -> anyhow::Result<()>;
+
+    async fn on_block_received(&self, block_hash: &BlockHash) -> anyhow::Result<()>;
 }
 
 #[derive(Debug, Clone)]
@@ -17,6 +25,7 @@ pub struct SyncService<N, C, R> {
     network: N,
     chain_store: C,
     peer_reputation: R,
+    pending_blocks: Arc<Mutex<HashSet<BlockHash>>>,
 }
 
 impl<N, C, R> SyncService<N, C, R>
@@ -30,6 +39,7 @@ where
             network,
             chain_store,
             peer_reputation,
+            pending_blocks: Arc::new(Mutex::new(HashSet::new())),
         }
     }
 
@@ -38,7 +48,22 @@ where
         peer_id: PeerId,
         announcement: BlockAnnouncement,
     ) -> anyhow::Result<()> {
-        tracing::debug!(%peer_id, ?announcement, "handling block announcement");
+        tracing::debug!(
+            %peer_id,
+            block_hash = %announcement.block_hash,
+            height = announcement.height,
+            "handling block announcement",
+        );
+
+        if let Err(error) = validate_block_announcement(&announcement) {
+            self.peer_reputation
+                .report_bad_peer(
+                    peer_id,
+                    format!("invalid block announcement for sync: {error}"),
+                )
+                .await?;
+            return Ok(());
+        }
 
         if self
             .chain_store
@@ -46,9 +71,18 @@ where
             .await
             .is_none()
         {
+            if !self.mark_pending(announcement.block_hash.clone()).await {
+                tracing::debug!(
+                    block_hash = %announcement.block_hash,
+                    height = announcement.height,
+                    "block sync request already pending",
+                );
+                return Ok(());
+            }
+
             if let Err(error) = self
                 .network
-                .request_block(peer_id.clone(), announcement.block_hash)
+                .request_block(peer_id.clone(), announcement.block_hash.clone())
                 .await
             {
                 if let Err(report_error) = self
@@ -63,6 +97,12 @@ where
                 }
                 return Err(error);
             }
+            tracing::info!(
+                %peer_id,
+                block_hash = %announcement.block_hash,
+                height = announcement.height,
+                "block sync requested",
+            );
         } else if let Err(error) = self
             .peer_reputation
             .report_good_peer(peer_id, "announced already-known block".to_string())
@@ -72,6 +112,15 @@ where
         }
 
         Ok(())
+    }
+
+    pub async fn on_block_received(&self, block_hash: &BlockHash) -> anyhow::Result<()> {
+        self.pending_blocks.lock().await.remove(block_hash);
+        Ok(())
+    }
+
+    async fn mark_pending(&self, block_hash: BlockHash) -> bool {
+        self.pending_blocks.lock().await.insert(block_hash)
     }
 }
 
@@ -88,6 +137,10 @@ where
         announcement: BlockAnnouncement,
     ) -> anyhow::Result<()> {
         self.on_block_announcement(peer_id, announcement).await
+    }
+
+    async fn on_block_received(&self, block_hash: &BlockHash) -> anyhow::Result<()> {
+        self.on_block_received(block_hash).await
     }
 }
 
@@ -188,6 +241,45 @@ mod tests {
             .await?;
 
         assert!(request_rx.try_recv().is_err());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn skips_duplicate_pending_announced_block() -> anyhow::Result<()> {
+        let (request_tx, mut request_rx) = mpsc::channel(4);
+        let sync = SyncService::new(
+            RecordingNetwork { request_tx },
+            ChainStore::new(),
+            RecordingReputation::default(),
+        );
+
+        sync.on_block_announcement(PeerId::from("peer-a"), announcement(1))
+            .await?;
+        sync.on_block_announcement(PeerId::from("peer-a"), announcement(1))
+            .await?;
+
+        assert!(request_rx.recv().await.is_some());
+        assert!(request_rx.try_recv().is_err());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn received_block_clears_pending_request() -> anyhow::Result<()> {
+        let (request_tx, mut request_rx) = mpsc::channel(4);
+        let sync = SyncService::new(
+            RecordingNetwork { request_tx },
+            ChainStore::new(),
+            RecordingReputation::default(),
+        );
+
+        sync.on_block_announcement(PeerId::from("peer-a"), announcement(1))
+            .await?;
+        sync.on_block_received(&BlockHash::from_u8(1)).await?;
+        sync.on_block_announcement(PeerId::from("peer-a"), announcement(1))
+            .await?;
+
+        assert!(request_rx.recv().await.is_some());
+        assert!(request_rx.recv().await.is_some());
         Ok(())
     }
 }

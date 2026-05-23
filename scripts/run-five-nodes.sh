@@ -19,6 +19,11 @@ run_node() {
   RUST_LOG="${RUST_LOG:-info}" cargo run -p p2p-chain-lib-cli -- \
     --listen "/ip4/127.0.0.1/tcp/${port}" \
     --node-key-seed "${name}" \
+    --validator node-1 \
+    --validator node-2 \
+    --validator node-3 \
+    --validator node-4 \
+    --validator node-5 \
     --produce-block-interval-ms 5000 \
     "$@" &
   PIDS+=("$!")

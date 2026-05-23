@@ -14,10 +14,12 @@ use p2p_chain_lib_node::{
     config::Config,
     node::{Node, NodeRuntime},
 };
+use p2p_chain_lib_sync::SyncService;
+use tracing_subscriber::EnvFilter;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    tracing_subscriber::fmt::init();
+    init_tracing();
 
     let config = Config::from_args()?;
     let block_production_interval = config.block_production_interval;
@@ -29,6 +31,8 @@ async fn main() -> anyhow::Result<()> {
         listen_addr: config.listen_addr.clone(),
         bootstrap_peers: config.bootstrap_peers.clone(),
         node_key_seed: config.node_key_seed.clone(),
+        validator_id: Some(consensus_node_id.clone()),
+        validators: config.validators.clone(),
     };
     let mut task_group = TaskGroup::new().with_shutdown_timeout(Duration::from_secs(5));
     let (network_event_tx, network_event_rx) = tokio::sync::mpsc::channel(1024);
@@ -45,7 +49,9 @@ async fn main() -> anyhow::Result<()> {
         peer_score.clone(),
         peer_score_event_rx,
     )?;
-    let consensus = SimpleConsensus::new(consensus_node_id, chain_store.clone());
+    let consensus =
+        SimpleConsensus::with_validators(consensus_node_id, chain_store.clone(), config.validators);
+    let sync = SyncService::new(network.clone(), chain_store.clone(), peer_score.clone());
     let network_cancellation_token = task_group.child_token();
     let peer_score_cancellation_token = task_group.child_token();
     let node_cancellation_token = task_group.child_token();
@@ -64,6 +70,7 @@ async fn main() -> anyhow::Result<()> {
         chain_store,
         mempool,
         consensus,
+        sync,
         peer_reputation: peer_score,
         network_event_rx,
         block_production_interval,
@@ -76,4 +83,18 @@ async fn main() -> anyhow::Result<()> {
     );
 
     task_group.wait().await
+}
+
+fn init_tracing() {
+    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
+
+    tracing_subscriber::fmt()
+        .with_env_filter(filter)
+        .compact()
+        .with_target(false)
+        .with_thread_ids(false)
+        .with_thread_names(false)
+        .with_file(false)
+        .with_line_number(false)
+        .init();
 }

@@ -7,6 +7,11 @@ services:
       - /ip4/0.0.0.0/tcp/4001
       - --node-key-seed
       - bootstrap
+      - --validator=bootstrap
+      - --validator=node-a
+      - --validator=node-b
+      - --validator=node-c
+      - --validator=node-d
       - --produce-block-interval-ms
       - "5000"
     ports:
@@ -22,10 +27,21 @@ services:
       - /ip4/0.0.0.0/tcp/4001
       - --node-key-seed
       - node-a
+      - --validator=bootstrap
+      - --validator=node-a
+      - --validator=node-b
+      - --validator=node-c
+      - --validator=node-d
       - --produce-block-interval-ms
       - "5000"
       - --bootstrap
-      - /dns4/bootstrap/tcp/4001
+      - /dns4/bootstrap/tcp/4001/p2p/12D3KooWKMdREvv5abosMqhavxYWBwAjvGfmrnLP6i4yZvSDBRHS
+      - --bootstrap
+      - /dns4/node-b/tcp/4001/p2p/12D3KooWJu8BuAap8ENmujTc3zrfx6ZFsALeKQsgwJ5tyJofJpsE
+      - --bootstrap
+      - /dns4/node-c/tcp/4001/p2p/12D3KooWPYLbG43vzPC2oRNrYde8Gz3GBcwrNXBzkX6bYKAacCsA
+      - --bootstrap
+      - /dns4/node-d/tcp/4001/p2p/12D3KooWLq9gbiTS2zo3qCiCBrBzyL25tocL7biKRjcFgC23KRhy
     depends_on:
       - bootstrap
     environment:
@@ -39,10 +55,21 @@ services:
       - /ip4/0.0.0.0/tcp/4001
       - --node-key-seed
       - node-b
+      - --validator=bootstrap
+      - --validator=node-a
+      - --validator=node-b
+      - --validator=node-c
+      - --validator=node-d
       - --produce-block-interval-ms
       - "5000"
       - --bootstrap
-      - /dns4/bootstrap/tcp/4001
+      - /dns4/bootstrap/tcp/4001/p2p/12D3KooWKMdREvv5abosMqhavxYWBwAjvGfmrnLP6i4yZvSDBRHS
+      - --bootstrap
+      - /dns4/node-a/tcp/4001/p2p/12D3KooWE2J1jFvVTa78TFmQuav9dUktUFa9zB1yQaBrHCGGjFQH
+      - --bootstrap
+      - /dns4/node-c/tcp/4001/p2p/12D3KooWPYLbG43vzPC2oRNrYde8Gz3GBcwrNXBzkX6bYKAacCsA
+      - --bootstrap
+      - /dns4/node-d/tcp/4001/p2p/12D3KooWLq9gbiTS2zo3qCiCBrBzyL25tocL7biKRjcFgC23KRhy
     depends_on:
       - bootstrap
     environment:
@@ -56,10 +83,21 @@ services:
       - /ip4/0.0.0.0/tcp/4001
       - --node-key-seed
       - node-c
+      - --validator=bootstrap
+      - --validator=node-a
+      - --validator=node-b
+      - --validator=node-c
+      - --validator=node-d
       - --produce-block-interval-ms
       - "5000"
       - --bootstrap
-      - /dns4/bootstrap/tcp/4001
+      - /dns4/bootstrap/tcp/4001/p2p/12D3KooWKMdREvv5abosMqhavxYWBwAjvGfmrnLP6i4yZvSDBRHS
+      - --bootstrap
+      - /dns4/node-a/tcp/4001/p2p/12D3KooWE2J1jFvVTa78TFmQuav9dUktUFa9zB1yQaBrHCGGjFQH
+      - --bootstrap
+      - /dns4/node-b/tcp/4001/p2p/12D3KooWJu8BuAap8ENmujTc3zrfx6ZFsALeKQsgwJ5tyJofJpsE
+      - --bootstrap
+      - /dns4/node-d/tcp/4001/p2p/12D3KooWLq9gbiTS2zo3qCiCBrBzyL25tocL7biKRjcFgC23KRhy
     depends_on:
       - bootstrap
     environment:
@@ -73,10 +111,21 @@ services:
       - /ip4/0.0.0.0/tcp/4001
       - --node-key-seed
       - node-d
+      - --validator=bootstrap
+      - --validator=node-a
+      - --validator=node-b
+      - --validator=node-c
+      - --validator=node-d
       - --produce-block-interval-ms
       - "5000"
       - --bootstrap
-      - /dns4/bootstrap/tcp/4001
+      - /dns4/bootstrap/tcp/4001/p2p/12D3KooWKMdREvv5abosMqhavxYWBwAjvGfmrnLP6i4yZvSDBRHS
+      - --bootstrap
+      - /dns4/node-a/tcp/4001/p2p/12D3KooWE2J1jFvVTa78TFmQuav9dUktUFa9zB1yQaBrHCGGjFQH
+      - --bootstrap
+      - /dns4/node-b/tcp/4001/p2p/12D3KooWJu8BuAap8ENmujTc3zrfx6ZFsALeKQsgwJ5tyJofJpsE
+      - --bootstrap
+      - /dns4/node-c/tcp/4001/p2p/12D3KooWPYLbG43vzPC2oRNrYde8Gz3GBcwrNXBzkX6bYKAacCsA
     depends_on:
       - bootstrap
     environment:

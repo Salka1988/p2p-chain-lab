@@ -7,48 +7,53 @@ use p2p_chain_lib_ports::{
     BlockBroadcastPort, BlockRequestPort, BlockSendPort, NetworkEvent, NetworkStatusPort,
     PeerReputationPort,
 };
+use p2p_chain_lib_sync::SyncPort;
 use tokio::{sync::mpsc, task::JoinHandle};
 use tokio_util::sync::CancellationToken;
 
-pub struct Node<N, C, M, K, R>
+pub struct Node<N, C, M, K, S, R>
 where
     N: NetworkStatusPort + BlockRequestPort + BlockSendPort + BlockBroadcastPort,
     C: BlockStorePort,
     M: MempoolPort,
     K: ConsensusPort,
+    S: SyncPort,
     R: PeerReputationPort,
 {
     network: N,
     event_loop_handle: JoinHandle<()>,
-    _ports: PhantomData<(C, M, K, R)>,
+    _ports: PhantomData<(C, M, K, S, R)>,
 }
 
-pub struct NodeRuntime<N, C, M, K, R> {
+pub struct NodeRuntime<N, C, M, K, S, R> {
     pub network: N,
     pub chain_store: C,
     pub mempool: M,
     pub consensus: K,
+    pub sync: S,
     pub peer_reputation: R,
     pub network_event_rx: mpsc::Receiver<NetworkEvent>,
     pub block_production_interval: Option<Duration>,
     pub cancellation_token: CancellationToken,
 }
 
-impl<N, C, M, K, R> Node<N, C, M, K, R>
+impl<N, C, M, K, S, R> Node<N, C, M, K, S, R>
 where
     N: NetworkStatusPort + BlockRequestPort + BlockSendPort + BlockBroadcastPort,
     C: BlockStorePort,
     M: MempoolPort,
     K: ConsensusPort,
+    S: SyncPort,
     R: PeerReputationPort,
 {
-    pub fn new(runtime: NodeRuntime<N, C, M, K, R>) -> Self {
+    pub fn new(runtime: NodeRuntime<N, C, M, K, S, R>) -> Self {
         let network = runtime.network.clone();
         let event_loop_handle = Self::spawn_event_loop(NodeRuntime {
             network: runtime.network,
             chain_store: runtime.chain_store,
             mempool: runtime.mempool,
             consensus: runtime.consensus,
+            sync: runtime.sync,
             peer_reputation: runtime.peer_reputation,
             network_event_rx: runtime.network_event_rx,
             block_production_interval: runtime.block_production_interval,
@@ -72,10 +77,11 @@ where
         Ok(())
     }
 
-    fn spawn_event_loop(runtime: NodeRuntime<N, C, M, K, R>) -> JoinHandle<()> {
+    fn spawn_event_loop(runtime: NodeRuntime<N, C, M, K, S, R>) -> JoinHandle<()> {
         tokio::spawn(async move {
-            let mut block_production_ticker =
-                runtime.block_production_interval.map(tokio::time::interval);
+            let mut block_production_ticker = runtime.block_production_interval.map(|interval| {
+                tokio::time::interval_at(tokio::time::Instant::now() + interval, interval)
+            });
             let mut network_event_rx = runtime.network_event_rx;
             loop {
                 tokio::select! {
@@ -119,19 +125,42 @@ where
                                 peer_id,
                                 announcement,
                             } => {
-                                tracing::info!(%peer_id, ?announcement, "block announcement received");
+                                tracing::info!(
+                                    %peer_id,
+                                    block_hash = %announcement.block_hash,
+                                    height = announcement.height,
+                                    "block announcement received",
+                                );
                                 if let Err(error) = Self::handle_consensus_event(
                                     &runtime.chain_store,
                                     &runtime.network,
                                     &runtime.peer_reputation,
                                     &runtime.consensus,
-                                    ConsensusEvent::BlockAnnouncement { peer_id, announcement },
+                                    ConsensusEvent::BlockAnnouncement {
+                                        peer_id: peer_id.clone(),
+                                        announcement: announcement.clone(),
+                                    },
                                 ).await {
                                     tracing::warn!(?error, "failed to handle block announcement through consensus");
                                 }
+                                if let Err(error) = runtime
+                                    .sync
+                                    .on_block_announcement(peer_id, announcement)
+                                    .await
+                                {
+                                    tracing::warn!(?error, "failed to handle block announcement through sync");
+                                }
                             }
                             NetworkEvent::BlockReceived { peer_id, block } => {
-                                tracing::info!(%peer_id, ?block, "block received");
+                                tracing::info!(
+                                    %peer_id,
+                                    block_hash = %block.hash,
+                                    height = block.height,
+                                    "block received",
+                                );
+                                if let Err(error) = runtime.sync.on_block_received(&block.hash).await {
+                                    tracing::warn!(?error, "failed to clear block sync request");
+                                }
                                 if let Err(error) = Self::handle_consensus_event(
                                     &runtime.chain_store,
                                     &runtime.network,
@@ -143,7 +172,7 @@ where
                                 }
                             }
                             NetworkEvent::BlockRequestReceived { peer_id, block_hash } => {
-                                tracing::info!(%peer_id, ?block_hash, "block request received");
+                                tracing::info!(%peer_id, block_hash = %block_hash, "block request received");
                                 match runtime.chain_store.get_block(&block_hash).await {
                                     Some(block) => {
                                         if let Err(error) = runtime.network.send_block(peer_id, block).await {
@@ -151,7 +180,7 @@ where
                                         }
                                     }
                                     None => {
-                                        tracing::debug!(?block_hash, "requested block not found");
+                                        tracing::debug!(block_hash = %block_hash, "requested block not found");
                                     }
                                 }
                             }
@@ -189,6 +218,11 @@ where
                     tracing::debug!(inserted, "consensus block store insert finished");
                 }
                 ConsensusCommand::BroadcastBlock(block) => {
+                    tracing::info!(
+                        block_hash = %block.hash,
+                        height = block.height,
+                        "block produced",
+                    );
                     network.broadcast_block(block).await?;
                 }
                 ConsensusCommand::RequestBlock {
