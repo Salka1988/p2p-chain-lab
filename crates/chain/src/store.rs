@@ -57,11 +57,12 @@ impl ChainStore {
 
     pub async fn insert(&self, block: Block) -> anyhow::Result<bool> {
         let mut blocks = self.blocks.lock().await;
-        let inserted = blocks.insert(block.hash.clone(), block).is_none();
-        if inserted {
-            self.persist(&blocks)?;
+        if blocks.contains_key(&block.hash) {
+            return Ok(false);
         }
-        Ok(inserted)
+        self.persist(&blocks, &block)?;
+        blocks.insert(block.hash.clone(), block);
+        Ok(true)
     }
 
     pub async fn len(&self) -> usize {
@@ -81,14 +82,19 @@ impl ChainStore {
             .cloned()
     }
 
-    fn persist(&self, blocks: &HashMap<BlockHash, Block>) -> anyhow::Result<()> {
+    fn persist(&self, blocks: &HashMap<BlockHash, Block>, block: &Block) -> anyhow::Result<()> {
         let Some(path) = &self.persistence_path else {
             return Ok(());
         };
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)?;
         }
-        let bytes = bincode::serialize(&blocks.values().cloned().collect::<Vec<_>>())?;
+        let bytes = bincode::serialize(
+            &blocks
+                .values()
+                .chain(std::iter::once(block))
+                .collect::<Vec<_>>(),
+        )?;
         let temporary_path = path.with_extension("tmp");
         fs::write(&temporary_path, bytes)?;
         fs::rename(temporary_path, path.as_ref())?;

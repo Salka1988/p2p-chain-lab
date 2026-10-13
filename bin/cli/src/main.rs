@@ -79,7 +79,6 @@ async fn main() -> anyhow::Result<()> {
         peer_reputation: peer_score,
         network_event_rx,
         block_production_interval,
-        cancellation_token: node_cancellation_token.clone(),
     });
 
     task_group.spawn(

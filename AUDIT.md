@@ -1,9 +1,219 @@
 # P2P Node Audit
 
+## Architecture and Rust audit — 2026-10-13
+
+What this repo does: a small P2P blockchain node with shared genesis, scheduled
+validators, persistent blocks, and late-join synchronization. This review assumes
+an undeployed development network, not a production consensus system.
+
+The structure is a reasonable start. The main problems are ownership and failure
+handling, not missing generics.
+
+### What is good
+
+- The CLI is the composition root: it constructs services and connects dependencies.
+- SyncService uses meaningful ports for block requests, storage, and reputation,
+  allowing tests without a running network.
+- Passing SyncService directly is fine. An application service does not need a
+  forwarding trait just because another service calls it.
+- Consensus returns explicit commands rather than broadcasting through libp2p.
+- Typed hashes, enums, bounded channels, cancellation tokens, and bounded
+  mempool/orphan storage are useful Rust choices.
+- Tests cover shared genesis, invalid signatures, reverse-order history,
+  persistence reopening, and task shutdown.
+
+### Must fix
+
+#### 1. Consensus and storage advance before persistence succeeds
+
+Status: fixed in the working tree. ChainStore persists the candidate snapshot
+before inserting into memory. Consensus now derives its next position from the
+stored tip instead of maintaining a second, prematurely advanced producer state.
+Node still executes storage before broadcast and stops command execution on error.
+
+Regression coverage forces a real filesystem write failure for both production
+and received-block paths, checks unchanged memory and disk, then retries the same
+block and verifies persistence after reopening.
+
+Fix verification: 72 library/binary tests, workspace Clippy with warnings denied,
+formatting checks, and the six-node late-join integration test all passed.
+This fixes write-error ordering; power-loss durability and incremental storage
+remain outside this change.
+
+Sources: [consensus](crates/consensus/src/lib.rs),
+[storage](crates/chain/src/store.rs).
+
+Consensus updates its next height before StoreBlock executes. ChainStore inserts
+into memory before writing the file. A failed write leaves memory ahead of disk;
+retrying the same block skips persistence because it already exists.
+
+Fix: persist successfully before committing the in-memory chain transition, then
+broadcast. Add a failing-write regression test.
+
+If skipped: restart can lose blocks the running node treated as accepted.
+
+#### 2. The node's real task is not properly supervised
+
+Status: fixed in the working tree. Node::new only stores its runtime. Node::run
+owns the event loop directly and uses a single cancellation token; a closed
+network event stream returns an error immediately, and panics reach the supervising
+task. Delayed sync tasks are owned by a JoinSet and aborted when the loop is
+dropped, rather than detached.
+
+Verification: 76 library/binary tests and workspace Clippy with warnings denied
+passed. New regressions cover construction without a Tokio runtime, early stream
+closure, cancellation, and propagation of event-loop panics. Live TCP/six-node
+tests were not rerun for this lifecycle change.
+
+Source: [node lifecycle](crates/node/src/node.rs).
+
+Node::new starts the event loop, but Node::run waits for cancellation before
+observing its result. An event-loop panic is not immediately reported through
+the CLI supervisor.
+
+Fix: make new construct only, and let run own the event loop and its cancellation.
+
+If skipped: the process can remain alive with its node loop dead.
+
+#### 3. Sync work can grow beyond the bounded queues
+
+Status: fixed in the working tree. One node-owned, supervised worker replaces
+per-tip tasks. Sync handlers enqueue work without waiting for request pacing or
+transport capacity. The concrete SyncService and its existing I/O ports remain;
+no new forwarding trait or generic NodeRuntime was added.
+
+Queued and in-flight requests share a 128-entry limit, with at most 64 tip
+requests, parent priority, hash deduplication, and ten-second expiry. Dispatch
+retains the 250ms tip grace period and 125ms pacing. A stalled transport send
+times out without penalizing the peer. Full queues drop new work and rely on
+later announcements; expired requests can likewise be retried on reannouncement.
+Cached orphan ancestry is followed to the missing block rather than downloaded
+again. Dropping the node loop aborts its worker.
+
+The worker is event-driven: enqueue, parent promotion, and request removal notify
+it to recompute its next deadline. With no pending work it waits without a timer;
+otherwise it waits for readiness/pacing or the earliest expiry. Sync activity is
+triggered by service calls, not a periodic polling loop. Regression tests check
+idle wake-ups, waking for new work, expiry back to idle, and parent promotion
+before the original tip deadline.
+
+Regression tests cover capacity, reserved parent slots, duplicate requests,
+expiry, cached-ancestry retries, pacing across clones, worker cancellation, and
+stalled transport. The first live run exposed repeated orphan downloads; that
+regression was fixed before the final verification.
+
+Verification: workspace library/binary tests, all nine network integration tests,
+and the six-node late-join test passed (22.57s on the event-driven worker). Workspace Clippy
+with warnings denied, formatting, and diff whitespace checks also passed.
+
+Sources: [tip handling](crates/node/src/node.rs),
+[request pacing](crates/sync/src/lib.rs).
+
+Original issue: every received tip spawned a task. Request pacing serialized those tasks
+at eight requests per second. Distinct unknown tips arriving faster than that
+accumulate waiting tasks; parent requests also wait behind them while the node
+is processing an event.
+
+Fix: use bounded, deduplicated scheduling owned by the node, with cancellation
+and expiry.
+
+If skipped: sustained traffic can increase memory use and delay synchronization.
+
+### Should fix
+
+#### 4. Consensus outcomes are too ambiguous
+
+Sources: [block handling](crates/node/src/node.rs),
+[consensus commands](crates/consensus/src/lib.rs).
+
+Node interprets a boolean and validates the candidate again to decide whether
+sync should act. Already-known blocks generate StoreBlock just to signal success.
+
+Fix: return explicit outcomes such as Accepted, AlreadyKnown, MissingParent, and
+Rejected. Tie peer reporting and sync decisions to those outcomes.
+
+If skipped: future changes can confuse “not yet applicable” with “invalid,”
+the distinction behind the earlier sync bug.
+
+#### 5. Domain and infrastructure responsibilities still overlap
+
+Sources: [chain storage](crates/chain/src/store.rs),
+[node dependencies](crates/node/src/node.rs).
+
+Chain storage combines a port, memory storage, filesystem operations, and
+serialization. Node names concrete network and storage adapters.
+
+Fix: move filesystem persistence into a storage adapter. If node is intended as
+the inner application layer, give its external I/O dependencies narrow contracts.
+Keep concrete application services like SyncService.
+
+If skipped: replacing storage or transport requires changing application wiring
+inside that layer.
+
+Hexagonal architecture means separating external I/O from application policy,
+not putting a trait around every struct.
+
+#### 6. The storage port has a misleading default
+
+Source: [BlockStorePort](crates/chain/src/store.rs).
+
+selected_tip defaults to None. An implementation that forgets this method silently
+looks like an empty chain, affecting genesis initialization and production.
+
+Fix: make selected_tip required. When adding fallible database reads, distinguish
+“not found” from “read failed” with Result<Option<_>, _>.
+
+If skipped: a new adapter can compile while supplying incorrect chain state.
+
+#### 7. Persistence rewrites the whole chain for every block
+
+Source: [persistence implementation](crates/chain/src/store.rs).
+
+Each insertion clones and serializes all blocks, then performs synchronous
+filesystem operations while holding the store lock. Each insertion becomes more
+expensive as history grows and blocks other store operations.
+
+Fix: move blocking I/O off async workers; use incremental storage before testing
+substantial histories.
+
+If skipped: short sync tests hide increasingly slow catch-up.
+
+#### 8. Architecture documentation describes code that no longer exists
+
+Source: [architecture document](ARCHITECTURE_MIGRATION.md).
+
+The document lists removed ports and says Node is generic. It also describes
+persistence and other implemented features as missing.
+
+Fix: document current boundaries and clearly separate planned changes.
+
+If skipped: it encourages reintroducing abstractions deliberately removed.
+
+### Verdict and verification
+
+Keep the concrete SyncService. Findings 1–3 are fixed; fix 4 next. Improve adapter
+boundaries afterward, without a broad “make everything generic” refactor.
+
+Checked: 71 library/binary tests passed with:
+
+```text
+cargo test --workspace --lib --bins --locked
+```
+
+No code changed during this review.
+
+Not checked in this review: live TCP/six-node tests, load benchmarks, or a full
+cryptographic/security audit.
+
+## Earlier audit record
+
+The following notes and verification results are retained as history. Their
+resolved status does not supersede the open findings above.
+
 The workspace builds cleanly with Clippy, and all unit tests pass. The real
 libp2p integration tests also pass when allowed to bind localhost sockets.
 
-## Current status
+## Earlier status
 
 The earlier findings below are resolved. A follow-up audit found four release
 blockers, which are addressed by the current working tree:

@@ -9,7 +9,6 @@ use p2p_chain_lib_protocol::{
     validation::{validate_block, validate_block_announcement},
 };
 use sha2::{Digest, Sha256};
-use tokio::sync::Mutex;
 
 #[derive(Debug, Clone)]
 pub enum ConsensusEvent {
@@ -47,15 +46,7 @@ pub struct SimpleConsensus<C> {
     signing_key: SigningKey,
     validator_keys: Vec<VerifyingKey>,
     chain_store: C,
-    producer_state: std::sync::Arc<Mutex<ProducerState>>,
     genesis: Option<Block>,
-}
-
-#[derive(Debug, Default)]
-struct ProducerState {
-    next_height: u64,
-    parent_hash: Option<BlockHash>,
-    initialized: bool,
 }
 
 impl<C> SimpleConsensus<C>
@@ -87,7 +78,6 @@ where
             signing_key,
             validator_keys,
             chain_store,
-            producer_state: std::sync::Arc::new(Mutex::new(ProducerState::default())),
             genesis: None,
         })
     }
@@ -153,16 +143,13 @@ where
     }
 
     async fn produce_block(&self) -> Option<Block> {
-        self.initialize_state().await;
-        let mut state = self.producer_state.lock().await;
-        let expected_producer = self.expected_producer(state.next_height)?;
+        let (height, parent_hash) = self.next_block_position().await;
+        let expected_producer = self.expected_producer(height)?;
 
         if *expected_producer != self.signing_key.verifying_key() {
             return None;
         }
 
-        let height = state.next_height;
-        let parent_hash = state.parent_hash.clone();
         let producer = validator_id(&self.signing_key.verifying_key());
         let mut block = Block {
             hash: BlockHash::zero(),
@@ -179,17 +166,7 @@ where
             .to_vec();
         block.hash = block_hash(&block);
 
-        state.next_height += 1;
-        state.parent_hash = Some(block.hash.clone());
         Some(block)
-    }
-
-    async fn observe_valid_block(&self, block: &Block) {
-        let mut state = self.producer_state.lock().await;
-        if block.height >= state.next_height {
-            state.next_height = block.height + 1;
-            state.parent_hash = Some(block.hash.clone());
-        }
     }
 
     fn expected_producer(&self, height: u64) -> Option<&VerifyingKey> {
@@ -199,16 +176,15 @@ where
     }
 
     async fn validate_received_block(&self, block: &Block) -> anyhow::Result<()> {
-        self.initialize_state().await;
         self.validate_block_candidate(block)?;
 
-        let state = self.producer_state.lock().await;
+        let (next_height, parent_hash) = self.next_block_position().await;
         anyhow::ensure!(
-            block.height == state.next_height,
+            block.height == next_height,
             "block does not extend the selected chain"
         );
         anyhow::ensure!(
-            block.parent_hash == state.parent_hash,
+            block.parent_hash == parent_hash,
             "block parent is not the selected tip"
         );
 
@@ -243,17 +219,12 @@ where
         Ok(())
     }
 
-    async fn initialize_state(&self) {
-        let tip = self.chain_store.selected_tip().await;
-        let mut state = self.producer_state.lock().await;
-        if state.initialized {
-            return;
+    async fn next_block_position(&self) -> (u64, Option<BlockHash>) {
+        // Only successfully stored blocks advance consensus.
+        match self.chain_store.selected_tip().await {
+            Some(tip) => (tip.height + 1, Some(tip.hash)),
+            None => (0, None),
         }
-        if let Some(tip) = tip {
-            state.next_height = tip.height + 1;
-            state.parent_hash = Some(tip.hash);
-        }
-        state.initialized = true;
     }
 }
 
@@ -329,16 +300,13 @@ where
                 }
 
                 match self.validate_received_block(&block).await {
-                    Ok(()) => {
-                        self.observe_valid_block(&block).await;
-                        Ok(vec![
-                            ConsensusCommand::StoreBlock(block),
-                            ConsensusCommand::ReportGoodPeer {
-                                peer_id,
-                                reason: "valid block received".to_string(),
-                            },
-                        ])
-                    }
+                    Ok(()) => Ok(vec![
+                        ConsensusCommand::StoreBlock(block),
+                        ConsensusCommand::ReportGoodPeer {
+                            peer_id,
+                            reason: "valid block received".to_string(),
+                        },
+                    ]),
                     Err(error) => Ok(vec![ConsensusCommand::ReportBadPeer {
                         peer_id,
                         reason: format!("invalid block: {error}"),
@@ -523,6 +491,80 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn failed_persistence_does_not_advance_production_or_received_blocks()
+    -> anyhow::Result<()> {
+        let directory = std::env::temp_dir().join(format!(
+            "consensus-write-failure-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)?
+                .as_nanos()
+        ));
+        std::fs::create_dir(&directory)?;
+        let path = directory.join("chain.bin");
+        let store = ChainStore::open(&path)?;
+        let consensus = SimpleConsensus::with_genesis(
+            "node-a",
+            store.clone(),
+            "write-failure",
+            vec![validator_id_from_seed("node-a")],
+        )
+        .await?;
+
+        for received in [false, true] {
+            let previous_tip = store.tip().await.unwrap();
+            let previous_bytes = std::fs::read(&path)?;
+            let commands = consensus.handle_event(ConsensusEvent::Tick).await?;
+            let ConsensusCommand::StoreBlock(candidate) = &commands[0] else {
+                panic!("expected proposed block");
+            };
+            let candidate = candidate.clone();
+            let event = if received {
+                ConsensusEvent::BlockReceived {
+                    peer_id: PeerId::from("peer-a"),
+                    block: candidate.clone(),
+                }
+            } else {
+                ConsensusEvent::Tick
+            };
+            // A directory at the temporary-file path forces a real write failure.
+            std::fs::create_dir(path.with_extension("tmp"))?;
+            let commands = consensus.handle_event(event.clone()).await?;
+            let ConsensusCommand::StoreBlock(block) = &commands[0] else {
+                panic!("expected store command");
+            };
+            assert!(store.insert(block.clone()).await.is_err());
+            assert_eq!(store.tip().await, Some(previous_tip.clone()));
+            assert!(store.get(&candidate.hash).await.is_none());
+            assert_eq!(std::fs::read(&path)?, previous_bytes);
+            assert_eq!(ChainStore::open(&path)?.tip().await, Some(previous_tip));
+
+            std::fs::remove_dir(path.with_extension("tmp"))?;
+            let retry = consensus.handle_event(event).await?;
+            let ConsensusCommand::StoreBlock(block) = &retry[0] else {
+                panic!("retry must still accept the same block");
+            };
+            assert_eq!(block, &candidate);
+            assert!(store.insert(block.clone()).await?);
+            assert!(!store.insert(block.clone()).await?);
+            assert_eq!(
+                ChainStore::open(&path)?.tip().await,
+                Some(candidate.clone())
+            );
+            let next = consensus.handle_event(ConsensusEvent::Tick).await?;
+            assert!(matches!(
+                &next[0],
+                ConsensusCommand::StoreBlock(block)
+                    if block.height == candidate.height + 1
+                        && block.parent_hash == Some(candidate.hash.clone())
+            ));
+        }
+        std::fs::remove_file(path)?;
+        std::fs::remove_dir(directory)?;
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn tick_produces_store_and_broadcast_commands() -> anyhow::Result<()> {
         let consensus = SimpleConsensus::new("node-a", ChainStore::new());
         let commands = consensus.handle_event(ConsensusEvent::Tick).await?;
@@ -566,9 +608,10 @@ mod tests {
 
     #[tokio::test]
     async fn received_block_advances_next_local_turn() -> anyhow::Result<()> {
+        let store = ChainStore::new();
         let consensus = SimpleConsensus::with_validators(
             "node-b",
-            ChainStore::new(),
+            store.clone(),
             vec![
                 validator_id_from_seed("node-a"),
                 validator_id_from_seed("node-b"),
@@ -582,6 +625,13 @@ mod tests {
                 block: parent.clone(),
             })
             .await?;
+        assert!(
+            consensus
+                .handle_event(ConsensusEvent::Tick)
+                .await?
+                .is_empty()
+        );
+        store.insert(parent.clone()).await?;
         let commands = consensus.handle_event(ConsensusEvent::Tick).await?;
 
         assert!(matches!(commands.as_slice(), [

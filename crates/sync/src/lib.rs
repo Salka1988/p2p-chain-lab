@@ -4,7 +4,6 @@ use std::{
     time::Duration,
 };
 
-use async_trait::async_trait;
 use p2p_chain_lib_chain::block::{Block, BlockHash};
 use p2p_chain_lib_chain::store::BlockStorePort;
 use p2p_chain_lib_ports::{BlockRequestPort, PeerId, PeerReputationPort};
@@ -12,30 +11,36 @@ use p2p_chain_lib_protocol::{
     messages::ChainTip,
     validation::{validate_block, validate_chain_tip},
 };
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, Notify};
 
 const PENDING_BLOCK_TIMEOUT: Duration = Duration::from_secs(10);
 // Leave headroom below the network's default 16 requests/second ingress limit.
 // shortcut: peers with stricter limits need negotiated request pacing before use.
 const BLOCK_REQUEST_INTERVAL: Duration = Duration::from_millis(125);
+const CHAIN_TIP_SYNC_DELAY: Duration = Duration::from_millis(250);
+const MAX_PENDING_REQUESTS: usize = 128;
+const MAX_TIP_REQUESTS: usize = 64;
 const MAX_ORPHAN_BLOCKS: usize = 1024;
 const MAX_ORPHAN_BLOCK_BYTES: usize = 16 * 1024 * 1024;
-
-#[async_trait]
-pub trait SyncPort: Clone + Send + Sync + 'static {
-    async fn on_chain_tip(&self, peer_id: PeerId, tip: ChainTip) -> anyhow::Result<()>;
-
-    async fn on_block_received(&self, block_hash: &BlockHash) -> anyhow::Result<()>;
-}
 
 #[derive(Debug, Clone)]
 pub struct SyncService<N, C, R> {
     network: N,
     chain_store: C,
     peer_reputation: R,
-    pending_blocks: Arc<Mutex<HashMap<BlockHash, tokio::time::Instant>>>,
+    pending_blocks: Arc<Mutex<HashMap<BlockHash, PendingRequest>>>,
     orphan_blocks: Arc<Mutex<OrphanBlocks>>,
-    next_block_request: Arc<Mutex<tokio::time::Instant>>,
+    request_worker: Arc<Mutex<()>>,
+    requests_changed: Arc<Notify>,
+}
+
+#[derive(Debug)]
+struct PendingRequest {
+    peer_id: PeerId,
+    queued_at: tokio::time::Instant,
+    ready_at: tokio::time::Instant,
+    sent_at: Option<tokio::time::Instant>,
+    parent: bool,
 }
 
 #[derive(Debug, Default)]
@@ -58,7 +63,8 @@ where
             peer_reputation,
             pending_blocks: Arc::new(Mutex::new(HashMap::new())),
             orphan_blocks: Arc::new(Mutex::new(OrphanBlocks::default())),
-            next_block_request: Arc::new(Mutex::new(tokio::time::Instant::now())),
+            request_worker: Arc::new(Mutex::new(())),
+            requests_changed: Arc::new(Notify::new()),
         }
     }
 
@@ -78,38 +84,7 @@ where
         }
 
         if self.chain_store.get_block(&tip.block_hash).await.is_none() {
-            if !self.mark_pending(tip.block_hash.clone()).await {
-                tracing::debug!(
-                    block_hash = %tip.block_hash,
-                    height = tip.height,
-                    "block sync request already pending",
-                );
-                return Ok(());
-            }
-
-            if let Err(error) = self
-                .request_block(peer_id.clone(), tip.block_hash.clone())
-                .await
-            {
-                if let Err(report_error) = self
-                    .peer_reputation
-                    .report_bad_peer(
-                        peer_id,
-                        format!("failed to request advertised chain tip: {error}"),
-                    )
-                    .await
-                {
-                    tracing::warn!(?report_error, "failed to report block request failure");
-                }
-                self.clear_pending(&tip.block_hash).await;
-                return Err(error);
-            }
-            tracing::info!(
-                %peer_id,
-                block_hash = %tip.block_hash,
-                height = tip.height,
-                "block sync requested",
-            );
+            self.enqueue_request(peer_id, tip.block_hash, false).await;
         } else if let Err(error) = self
             .peer_reputation
             .report_good_peer(peer_id, "advertised already-known chain tip".to_string())
@@ -145,7 +120,8 @@ where
         if !self.cache_orphan(peer_id.clone(), block).await {
             return Ok(());
         }
-        self.request_missing_block(peer_id, parent_hash).await
+        self.enqueue_request(peer_id, parent_hash, true).await;
+        Ok(())
     }
 
     pub async fn take_children(&self, parent_hash: &BlockHash) -> Vec<(PeerId, Block)> {
@@ -170,36 +146,89 @@ where
         children
     }
 
-    async fn request_missing_block(
-        &self,
-        peer_id: PeerId,
-        block_hash: BlockHash,
-    ) -> anyhow::Result<()> {
-        if !self.mark_pending(block_hash.clone()).await {
-            return Ok(());
+    /// Drive queued requests alongside the node event loop. Dropping this future
+    /// stops dispatch; handlers only enqueue bounded work and never wait for pacing.
+    /// When idle, wait for work; timers exist only for queued work or expiry.
+    pub async fn run_requests(&self) -> anyhow::Result<()> {
+        let _worker = self
+            .request_worker
+            .try_lock()
+            .map_err(|_| anyhow::anyhow!("sync request worker already running"))?;
+        let mut next_send = tokio::time::Instant::now();
+        loop {
+            let deadline = self.next_deadline(next_send).await;
+            tokio::select! {
+                _ = self.requests_changed.notified() => {}
+                _ = async {
+                    match deadline {
+                        Some(deadline) => tokio::time::sleep_until(deadline).await,
+                        None => std::future::pending::<()>().await,
+                    }
+                } => {
+                    if tokio::time::Instant::now() >= next_send && self.dispatch_request().await {
+                        next_send = tokio::time::Instant::now() + BLOCK_REQUEST_INTERVAL;
+                    }
+                }
+            }
         }
-        if let Err(error) = self
-            .request_block(peer_id.clone(), block_hash.clone())
-            .await
-        {
-            self.clear_pending(&block_hash).await;
-            self.peer_reputation
-                .report_bad_peer(
-                    peer_id,
-                    format!("failed to request missing parent block: {error}"),
-                )
-                .await?;
-            return Err(error);
-        }
-        Ok(())
     }
 
-    async fn request_block(&self, peer_id: PeerId, block_hash: BlockHash) -> anyhow::Result<()> {
-        let mut next_request = self.next_block_request.lock().await;
-        tokio::time::sleep_until(*next_request).await;
-        self.network.request_block(peer_id, block_hash).await?;
-        *next_request = tokio::time::Instant::now() + BLOCK_REQUEST_INTERVAL;
-        Ok(())
+    async fn next_deadline(&self, next_send: tokio::time::Instant) -> Option<tokio::time::Instant> {
+        let now = tokio::time::Instant::now();
+        let mut pending = self.pending_blocks.lock().await;
+        pending.retain(|_, request| {
+            now.duration_since(request.sent_at.unwrap_or(request.queued_at)) < PENDING_BLOCK_TIMEOUT
+        });
+        pending
+            .values()
+            .map(|request| {
+                let expiry = request.sent_at.unwrap_or(request.queued_at) + PENDING_BLOCK_TIMEOUT;
+                if request.sent_at.is_some() {
+                    expiry
+                } else {
+                    expiry.min(request.ready_at.max(next_send))
+                }
+            })
+            .min()
+    }
+
+    async fn dispatch_request(&self) -> bool {
+        let now = tokio::time::Instant::now();
+        let selected = {
+            let mut pending = self.pending_blocks.lock().await;
+            pending.retain(|_, request| {
+                now.duration_since(request.sent_at.unwrap_or(request.queued_at))
+                    < PENDING_BLOCK_TIMEOUT
+            });
+            let hash = pending
+                .iter()
+                .filter(|(_, request)| request.sent_at.is_none() && request.ready_at <= now)
+                .min_by_key(|(_, request)| (!request.parent, request.queued_at))
+                .map(|(hash, _)| hash.clone());
+            hash.map(|hash| {
+                let request = pending.get_mut(&hash).expect("selected pending request");
+                request.sent_at = Some(now);
+                (hash, request.peer_id.clone())
+            })
+        };
+        let Some((hash, peer_id)) = selected else {
+            return false;
+        };
+        if self.chain_store.get_block(&hash).await.is_some() {
+            self.clear_pending(&hash).await;
+            return false;
+        }
+        let result = tokio::time::timeout(
+            BLOCK_REQUEST_INTERVAL,
+            self.network.request_block(peer_id.clone(), hash.clone()),
+        )
+        .await;
+        if !matches!(result, Ok(Ok(()))) {
+            // Local queue pressure is not evidence of remote peer misconduct.
+            tracing::warn!(%peer_id, block_hash = %hash, ?result, "failed to dispatch sync request");
+            self.clear_pending(&hash).await;
+        }
+        true
     }
 
     async fn cache_orphan(&self, peer_id: PeerId, block: Block) -> bool {
@@ -227,20 +256,81 @@ where
         true
     }
 
-    async fn mark_pending(&self, block_hash: BlockHash) -> bool {
-        let now = tokio::time::Instant::now();
-        let mut pending_blocks = self.pending_blocks.lock().await;
-        match pending_blocks.get(&block_hash) {
-            Some(started_at) if now.duration_since(*started_at) < PENDING_BLOCK_TIMEOUT => false,
-            _ => {
-                pending_blocks.insert(block_hash, now);
-                true
+    async fn enqueue_request(&self, peer_id: PeerId, mut block_hash: BlockHash, mut parent: bool) {
+        // Follow downloaded orphans to the missing ancestor instead of repeatedly
+        // fetching the same suffix. This also permits retry after request expiry.
+        {
+            let orphans = self.orphan_blocks.lock().await;
+            for depth in 0..=MAX_ORPHAN_BLOCKS {
+                let Some((_, block)) = orphans.blocks.get(&block_hash) else {
+                    break;
+                };
+                if depth == MAX_ORPHAN_BLOCKS {
+                    return;
+                }
+                let Some(hash) = &block.parent_hash else {
+                    return;
+                };
+                block_hash = hash.clone();
+                parent = true;
             }
         }
+        if self.chain_store.get_block(&block_hash).await.is_some() {
+            return;
+        }
+        let now = tokio::time::Instant::now();
+        let mut pending_blocks = self.pending_blocks.lock().await;
+        pending_blocks.retain(|_, request| {
+            now.duration_since(request.sent_at.unwrap_or(request.queued_at)) < PENDING_BLOCK_TIMEOUT
+        });
+        if let Some(request) = pending_blocks.get_mut(&block_hash) {
+            if parent && !request.parent {
+                request.parent = true;
+                request.ready_at = now;
+                request.peer_id = peer_id;
+                self.requests_changed.notify_one();
+            }
+            return;
+        }
+        // Reserve half the capacity for ancestry, so tip floods cannot block catch-up.
+        if pending_blocks.len() >= MAX_PENDING_REQUESTS
+            || (!parent
+                && pending_blocks
+                    .values()
+                    .filter(|request| !request.parent)
+                    .count()
+                    >= MAX_TIP_REQUESTS)
+        {
+            tracing::debug!(%block_hash, "sync request queue full; await a later announcement");
+            return;
+        }
+        pending_blocks.insert(
+            block_hash,
+            PendingRequest {
+                peer_id,
+                queued_at: now,
+                ready_at: if parent {
+                    now
+                } else {
+                    now + CHAIN_TIP_SYNC_DELAY
+                },
+                sent_at: None,
+                parent,
+            },
+        );
+        self.requests_changed.notify_one();
     }
 
     async fn clear_pending(&self, block_hash: &BlockHash) {
-        self.pending_blocks.lock().await.remove(block_hash);
+        if self
+            .pending_blocks
+            .lock()
+            .await
+            .remove(block_hash)
+            .is_some()
+        {
+            self.requests_changed.notify_one();
+        }
     }
 }
 
@@ -248,26 +338,11 @@ fn block_size(block: &Block) -> usize {
     block.body.len() + block.producer.len() + block.signature.len() + 72
 }
 
-#[async_trait]
-impl<N, C, R> SyncPort for SyncService<N, C, R>
-where
-    N: BlockRequestPort,
-    C: BlockStorePort,
-    R: PeerReputationPort,
-{
-    async fn on_chain_tip(&self, peer_id: PeerId, tip: ChainTip) -> anyhow::Result<()> {
-        self.on_chain_tip(peer_id, tip).await
-    }
-
-    async fn on_block_received(&self, block_hash: &BlockHash) -> anyhow::Result<()> {
-        self.on_block_received(block_hash).await
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
 
+    use async_trait::async_trait;
     use tokio::sync::mpsc;
 
     use super::*;
@@ -339,7 +414,79 @@ mod tests {
         }
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
+    async fn idle_worker_has_no_timer_and_wakes_for_new_work() -> anyhow::Result<()> {
+        use std::{
+            future::Future,
+            sync::atomic::{AtomicUsize, Ordering},
+        };
+        let (request_tx, mut request_rx) = mpsc::channel(4);
+        let sync = SyncService::new(
+            RecordingNetwork { request_tx },
+            ChainStore::new(),
+            RecordingReputation::default(),
+        );
+        let polls = Arc::new(AtomicUsize::new(0));
+        let worker_polls = polls.clone();
+        let worker = sync.clone();
+        let mut workers = tokio::task::JoinSet::new();
+        workers.spawn(async move {
+            let future = worker.run_requests();
+            tokio::pin!(future);
+            std::future::poll_fn(|cx| {
+                worker_polls.fetch_add(1, Ordering::SeqCst);
+                future.as_mut().poll(cx)
+            })
+            .await
+        });
+        tokio::task::yield_now().await;
+        let idle_polls = polls.load(Ordering::SeqCst);
+        tokio::time::advance(Duration::from_secs(60)).await;
+        tokio::task::yield_now().await;
+        assert_eq!(polls.load(Ordering::SeqCst), idle_polls);
+        sync.on_chain_tip(PeerId::from("peer-a"), chain_tip(1))
+            .await?;
+        assert_eq!(request_rx.recv().await.unwrap().1, BlockHash::from_u8(1));
+        tokio::time::advance(PENDING_BLOCK_TIMEOUT).await;
+        tokio::task::yield_now().await;
+        assert!(sync.pending_blocks.lock().await.is_empty());
+        let idle_polls = polls.load(Ordering::SeqCst);
+        tokio::time::advance(Duration::from_secs(60)).await;
+        tokio::task::yield_now().await;
+        assert_eq!(polls.load(Ordering::SeqCst), idle_polls);
+        workers.shutdown().await;
+        Ok(())
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn parent_promotion_wakes_worker_before_tip_deadline() -> anyhow::Result<()> {
+        let (request_tx, mut request_rx) = mpsc::channel(4);
+        let sync = SyncService::new(
+            RecordingNetwork { request_tx },
+            ChainStore::new(),
+            RecordingReputation::default(),
+        );
+        sync.on_chain_tip(PeerId::from("peer-a"), chain_tip(2))
+            .await?;
+        let worker = sync.clone();
+        let mut workers = tokio::task::JoinSet::new();
+        workers.spawn(async move { worker.run_requests().await });
+        tokio::task::yield_now().await;
+        let started = tokio::time::Instant::now();
+        sync.on_unaccepted_block(PeerId::from("peer-b"), child_block(3, 2, 3))
+            .await?;
+        assert_eq!(
+            request_rx.recv().await.unwrap(),
+            (PeerId::from("peer-b"), BlockHash::from_u8(2))
+        );
+        assert!(started.elapsed() < CHAIN_TIP_SYNC_DELAY);
+        sync.on_block_received(&BlockHash::from_u8(2)).await?;
+        assert!(sync.next_deadline(started).await.is_none());
+        workers.shutdown().await;
+        Ok(())
+    }
+
+    #[tokio::test(start_paused = true)]
     async fn paces_tip_and_parent_requests_across_clones() -> anyhow::Result<()> {
         let (request_tx, mut request_rx) = mpsc::channel(4);
         let sync = SyncService::new(
@@ -349,17 +496,29 @@ mod tests {
         );
         sync.on_chain_tip(PeerId::from("peer-a"), chain_tip(3))
             .await?;
+        let mut workers = tokio::task::JoinSet::new();
+        let worker = sync.clone();
+        workers.spawn(async move { worker.run_requests().await });
+        let started = tokio::time::Instant::now();
         assert!(request_rx.recv().await.is_some());
-        let next_request = *sync.next_block_request.lock().await;
+        assert!(started.elapsed() >= CHAIN_TIP_SYNC_DELAY);
+        let sent = tokio::time::Instant::now();
         sync.clone()
             .on_unaccepted_block(PeerId::from("peer-a"), child_block(3, 2, 3))
             .await?;
         assert!(request_rx.recv().await.is_some());
-        assert!(tokio::time::Instant::now() >= next_request);
+        assert!(sent.elapsed() >= BLOCK_REQUEST_INTERVAL);
+        assert!(sync.run_requests().await.is_err());
+        workers.shutdown().await;
+        sync.on_chain_tip(PeerId::from("peer-a"), chain_tip(4))
+            .await?;
+        tokio::time::advance(PENDING_BLOCK_TIMEOUT).await;
+        assert!(request_rx.try_recv().is_err());
+        assert!(sync.request_worker.try_lock().is_ok());
         Ok(())
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn requests_missing_advertised_tip() -> anyhow::Result<()> {
         let (request_tx, mut request_rx) = mpsc::channel(4);
         let sync = SyncService::new(
@@ -371,6 +530,8 @@ mod tests {
         sync.on_chain_tip(PeerId::from("peer-a"), chain_tip(1))
             .await?;
 
+        tokio::time::advance(CHAIN_TIP_SYNC_DELAY).await;
+        sync.dispatch_request().await;
         assert!(matches!(
             request_rx.recv().await,
             Some((peer_id, block_hash))
@@ -379,7 +540,7 @@ mod tests {
         Ok(())
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn skips_known_advertised_tip() -> anyhow::Result<()> {
         let (request_tx, mut request_rx) = mpsc::channel(4);
         let store = ChainStore::new();
@@ -393,11 +554,13 @@ mod tests {
         sync.on_chain_tip(PeerId::from("peer-a"), chain_tip(1))
             .await?;
 
+        tokio::time::advance(CHAIN_TIP_SYNC_DELAY).await;
+        sync.dispatch_request().await;
         assert!(request_rx.try_recv().is_err());
         Ok(())
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn skips_duplicate_pending_advertised_tip() -> anyhow::Result<()> {
         let (request_tx, mut request_rx) = mpsc::channel(4);
         let sync = SyncService::new(
@@ -411,12 +574,15 @@ mod tests {
         sync.on_chain_tip(PeerId::from("peer-a"), chain_tip(1))
             .await?;
 
+        tokio::time::advance(CHAIN_TIP_SYNC_DELAY).await;
+        sync.dispatch_request().await;
+        sync.dispatch_request().await;
         assert!(request_rx.recv().await.is_some());
         assert!(request_rx.try_recv().is_err());
         Ok(())
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn received_block_clears_pending_request() -> anyhow::Result<()> {
         let (request_tx, mut request_rx) = mpsc::channel(4);
         let sync = SyncService::new(
@@ -428,15 +594,19 @@ mod tests {
         sync.on_chain_tip(PeerId::from("peer-a"), chain_tip(1))
             .await?;
         sync.on_block_received(&BlockHash::from_u8(1)).await?;
+        tokio::time::advance(CHAIN_TIP_SYNC_DELAY).await;
+        sync.dispatch_request().await;
+        assert!(request_rx.try_recv().is_err());
         sync.on_chain_tip(PeerId::from("peer-a"), chain_tip(1))
             .await?;
 
-        assert!(request_rx.recv().await.is_some());
+        tokio::time::advance(CHAIN_TIP_SYNC_DELAY).await;
+        sync.dispatch_request().await;
         assert!(request_rx.recv().await.is_some());
         Ok(())
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn retries_after_request_failure() -> anyhow::Result<()> {
         let (request_tx, mut request_rx) = mpsc::channel(4);
         let sync = SyncService::new(
@@ -448,37 +618,20 @@ mod tests {
 
         sync.on_chain_tip(PeerId::from("peer-a"), chain_tip(1))
             .await?;
+        tokio::time::advance(CHAIN_TIP_SYNC_DELAY).await;
+        sync.dispatch_request().await;
         sync.on_block_request_failed(&hash).await?;
         sync.on_chain_tip(PeerId::from("peer-b"), chain_tip(1))
             .await?;
 
+        tokio::time::advance(CHAIN_TIP_SYNC_DELAY).await;
+        sync.dispatch_request().await;
         assert!(request_rx.recv().await.is_some());
         assert!(request_rx.recv().await.is_some());
         Ok(())
     }
 
-    #[tokio::test]
-    async fn retries_after_rejected_block_response() -> anyhow::Result<()> {
-        let (request_tx, mut request_rx) = mpsc::channel(4);
-        let sync = SyncService::new(
-            RecordingNetwork { request_tx },
-            ChainStore::new(),
-            RecordingReputation::default(),
-        );
-        let hash = BlockHash::from_u8(1);
-
-        sync.on_chain_tip(PeerId::from("peer-a"), chain_tip(1))
-            .await?;
-        sync.on_block_request_failed(&hash).await?;
-        sync.on_chain_tip(PeerId::from("peer-b"), chain_tip(1))
-            .await?;
-
-        assert!(request_rx.recv().await.is_some());
-        assert!(request_rx.recv().await.is_some());
-        Ok(())
-    }
-
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn retries_after_pending_request_times_out() -> anyhow::Result<()> {
         let (request_tx, mut request_rx) = mpsc::channel(4);
         let sync = SyncService::new(
@@ -486,16 +639,21 @@ mod tests {
             ChainStore::new(),
             RecordingReputation::default(),
         );
-        let hash = BlockHash::from_u8(1);
-
-        sync.mark_pending(hash.clone()).await;
-        sync.pending_blocks
-            .lock()
-            .await
-            .insert(hash, tokio::time::Instant::now() - PENDING_BLOCK_TIMEOUT);
+        sync.on_chain_tip(PeerId::from("peer-a"), chain_tip(1))
+            .await?;
+        sync.on_chain_tip(PeerId::from("peer-a"), chain_tip(2))
+            .await?;
+        tokio::time::advance(CHAIN_TIP_SYNC_DELAY).await;
+        sync.dispatch_request().await;
+        assert!(request_rx.recv().await.is_some());
+        tokio::time::advance(PENDING_BLOCK_TIMEOUT).await;
+        sync.dispatch_request().await;
+        assert!(sync.pending_blocks.lock().await.is_empty());
         sync.on_chain_tip(PeerId::from("peer-a"), chain_tip(1))
             .await?;
 
+        tokio::time::advance(CHAIN_TIP_SYNC_DELAY).await;
+        sync.dispatch_request().await;
         assert!(request_rx.recv().await.is_some());
         Ok(())
     }
@@ -513,6 +671,7 @@ mod tests {
         sync.on_unaccepted_block(PeerId::from("peer-a"), child.clone())
             .await?;
 
+        sync.dispatch_request().await;
         assert!(matches!(
             request_rx.recv().await,
             Some((peer_id, hash)) if peer_id == PeerId::from("peer-a") && hash == BlockHash::from_u8(1)
@@ -521,6 +680,108 @@ mod tests {
             sync.take_children(&BlockHash::from_u8(1)).await,
             vec![(PeerId::from("peer-a"), child)]
         );
+        Ok(())
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn bounds_tip_floods_and_reserves_priority_for_parents() -> anyhow::Result<()> {
+        let (request_tx, mut request_rx) = mpsc::channel(4);
+        let reputation = RecordingReputation::default();
+        let sync = SyncService::new(
+            RecordingNetwork { request_tx },
+            ChainStore::new(),
+            reputation.clone(),
+        );
+        for hash in 1..201 {
+            sync.clone()
+                .on_chain_tip(PeerId::from("peer-a"), chain_tip(hash))
+                .await?;
+        }
+        assert_eq!(sync.pending_blocks.lock().await.len(), MAX_TIP_REQUESTS);
+        for hash in 1..65 {
+            sync.on_chain_tip(PeerId::from("peer-b"), chain_tip(hash))
+                .await?;
+        }
+        assert_eq!(sync.pending_blocks.lock().await.len(), MAX_TIP_REQUESTS);
+        for hash in 100..200 {
+            sync.enqueue_request(PeerId::from("peer-b"), BlockHash::from_u8(hash), true)
+                .await;
+        }
+        assert_eq!(sync.pending_blocks.lock().await.len(), MAX_PENDING_REQUESTS);
+        tokio::time::advance(CHAIN_TIP_SYNC_DELAY).await;
+        sync.dispatch_request().await;
+        let (peer, _) = request_rx.try_recv()?;
+        assert_eq!(peer, PeerId::from("peer-b"));
+        assert!(reputation.reports.lock().await.is_empty());
+        Ok(())
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn stalled_transport_does_not_block_enqueue_or_penalize_peers() -> anyhow::Result<()> {
+        let (request_tx, mut request_rx) = mpsc::channel(1);
+        request_tx
+            .send((PeerId::from("occupied"), BlockHash::from_u8(0)))
+            .await?;
+        let reputation = RecordingReputation::default();
+        let sync = SyncService::new(
+            RecordingNetwork { request_tx },
+            ChainStore::new(),
+            reputation.clone(),
+        );
+        // Neither handler waits for a free network slot or the pacing timer.
+        let started = tokio::time::Instant::now();
+        sync.on_chain_tip(PeerId::from("peer-a"), chain_tip(3))
+            .await?;
+        sync.on_unaccepted_block(PeerId::from("peer-a"), child_block(3, 2, 3))
+            .await?;
+        assert_eq!(started.elapsed(), Duration::ZERO);
+        sync.dispatch_request().await;
+        assert!(
+            !sync
+                .pending_blocks
+                .lock()
+                .await
+                .contains_key(&BlockHash::from_u8(2))
+        );
+        assert!(reputation.reports.lock().await.is_empty());
+        request_rx.try_recv()?;
+        sync.on_unaccepted_block(PeerId::from("peer-b"), child_block(3, 2, 3))
+            .await?;
+        sync.dispatch_request().await;
+        assert_eq!(
+            request_rx.try_recv()?,
+            (PeerId::from("peer-b"), BlockHash::from_u8(2))
+        );
+        Ok(())
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn cached_history_is_not_requested_again_and_missing_ancestry_can_retry()
+    -> anyhow::Result<()> {
+        let (request_tx, mut request_rx) = mpsc::channel(4);
+        let sync = SyncService::new(
+            RecordingNetwork { request_tx },
+            ChainStore::new(),
+            RecordingReputation::default(),
+        );
+        sync.on_unaccepted_block(PeerId::from("peer-a"), child_block(3, 2, 3))
+            .await?;
+        sync.on_unaccepted_block(PeerId::from("peer-a"), child_block(2, 1, 2))
+            .await?;
+        sync.on_chain_tip(PeerId::from("peer-b"), chain_tip(3))
+            .await?;
+        assert_eq!(sync.pending_blocks.lock().await.len(), 1);
+        sync.dispatch_request().await;
+        assert_eq!(request_rx.try_recv()?.1, BlockHash::from_u8(1));
+        tokio::time::advance(PENDING_BLOCK_TIMEOUT).await;
+        sync.on_chain_tip(PeerId::from("peer-b"), chain_tip(3))
+            .await?;
+        sync.dispatch_request().await;
+        assert_eq!(
+            request_rx.try_recv()?,
+            (PeerId::from("peer-b"), BlockHash::from_u8(1))
+        );
+        assert!(request_rx.try_recv().is_err());
         Ok(())
     }
 }

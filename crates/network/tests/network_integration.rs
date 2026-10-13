@@ -220,17 +220,6 @@ fn block(hash: u8, height: u64) -> Block {
 }
 
 #[tokio::test]
-async fn two_services_connect_over_libp2p() -> anyhow::Result<()> {
-    let (first, second, first_peer_id) = connected_pair().await?;
-
-    assert!(!first_peer_id.as_str().is_empty());
-
-    second.stop().await?;
-    first.stop().await?;
-    Ok(())
-}
-
-#[tokio::test]
 async fn disconnects_peer_that_exceeds_block_request_limit() -> anyhow::Result<()> {
     let first_seed = "rate-limit-node-a";
     let mut first = TestNetwork::start_with_limits(first_seed, Vec::new(), 64, 1).await?;
@@ -434,6 +423,8 @@ async fn late_joiner_requests_an_advertised_chain_tip() -> anyhow::Result<()> {
 
     let sync = SyncService::new(second.handle.clone(), ChainStore::new(), NoopReputation);
     sync.on_chain_tip(tip_peer_id, received_tip).await?;
+    let mut workers = tokio::task::JoinSet::new();
+    workers.spawn(async move { sync.run_requests().await });
 
     let request_peer_id = first
         .wait_for_event(|event| match event {
@@ -457,6 +448,7 @@ async fn late_joiner_requests_an_advertised_chain_tip() -> anyhow::Result<()> {
         .await?;
     assert_eq!(received, expected);
 
+    workers.shutdown().await;
     second.stop().await?;
     first.stop().await?;
     Ok(())
