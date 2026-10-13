@@ -189,6 +189,14 @@ not putting a trait around every struct.
 
 #### 6. The storage port has a misleading default
 
+Status: fixed in the working tree. selected_tip is now required, so adapters
+cannot silently inherit an empty-chain result. ChainStore, the only current
+implementation, already implements it explicitly; runtime behavior is unchanged.
+
+Verification: workspace library/binary tests, Clippy with warnings denied, and
+formatting checks passed. Live TCP tests were not rerun for this contract-only
+change. Fallible database reads remain future work, not part of this fix.
+
 Source: [BlockStorePort](crates/chain/src/store.rs).
 
 selected_tip defaults to None. An implementation that forgets this method silently
