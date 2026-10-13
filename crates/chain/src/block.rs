@@ -42,5 +42,7 @@ pub struct Block {
     pub hash: BlockHash,
     pub parent_hash: Option<BlockHash>,
     pub height: u64,
+    pub producer: String,
+    pub signature: Vec<u8>,
     pub body: Vec<u8>,
 }

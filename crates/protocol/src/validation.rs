@@ -22,6 +22,11 @@ pub fn validate_block_announcement(announcement: &BlockAnnouncement) -> anyhow::
 pub fn validate_block(block: &Block) -> anyhow::Result<()> {
     anyhow::ensure!(!block.hash.is_zero(), "block hash cannot be zero");
     anyhow::ensure!(!block.body.is_empty(), "block body cannot be empty");
+    anyhow::ensure!(!block.producer.is_empty(), "block producer cannot be empty");
+    anyhow::ensure!(
+        !block.signature.is_empty(),
+        "block signature cannot be empty"
+    );
 
     match (block.parent_hash.as_ref(), block.height) {
         (None, 0) => Ok(()),
@@ -85,6 +90,8 @@ mod tests {
                 hash: BlockHash::from_u8(1),
                 parent_hash: None,
                 height: 0,
+                producer: "validator".to_string(),
+                signature: vec![1],
                 body: vec![1],
             })
             .is_ok()
@@ -95,6 +102,8 @@ mod tests {
                 hash: BlockHash::from_u8(2),
                 parent_hash: Some(BlockHash::from_u8(1)),
                 height: 1,
+                producer: "validator".to_string(),
+                signature: vec![1],
                 body: vec![1],
             })
             .is_ok()
@@ -105,6 +114,8 @@ mod tests {
                 hash: BlockHash::zero(),
                 parent_hash: None,
                 height: 0,
+                producer: "validator".to_string(),
+                signature: vec![1],
                 body: vec![1],
             })
             .is_err()
@@ -115,6 +126,8 @@ mod tests {
                 hash: BlockHash::from_u8(1),
                 parent_hash: None,
                 height: 1,
+                producer: "validator".to_string(),
+                signature: vec![1],
                 body: vec![1],
             })
             .is_err()

@@ -1,4 +1,4 @@
-use std::{collections::HashSet, sync::Arc};
+use std::{collections::HashMap, sync::Arc, time::Duration};
 
 use async_trait::async_trait;
 use p2p_chain_lib_chain::block::BlockHash;
@@ -8,6 +8,8 @@ use p2p_chain_lib_protocol::{
     messages::BlockAnnouncement, validation::validate_block_announcement,
 };
 use tokio::sync::Mutex;
+
+const PENDING_BLOCK_TIMEOUT: Duration = Duration::from_secs(10);
 
 #[async_trait]
 pub trait SyncPort: Clone + Send + Sync + 'static {
@@ -25,7 +27,7 @@ pub struct SyncService<N, C, R> {
     network: N,
     chain_store: C,
     peer_reputation: R,
-    pending_blocks: Arc<Mutex<HashSet<BlockHash>>>,
+    pending_blocks: Arc<Mutex<HashMap<BlockHash, tokio::time::Instant>>>,
 }
 
 impl<N, C, R> SyncService<N, C, R>
@@ -39,7 +41,7 @@ where
             network,
             chain_store,
             peer_reputation,
-            pending_blocks: Arc::new(Mutex::new(HashSet::new())),
+            pending_blocks: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -95,6 +97,7 @@ where
                 {
                     tracing::warn!(?report_error, "failed to report block request failure");
                 }
+                self.clear_pending(&announcement.block_hash).await;
                 return Err(error);
             }
             tracing::info!(
@@ -115,12 +118,29 @@ where
     }
 
     pub async fn on_block_received(&self, block_hash: &BlockHash) -> anyhow::Result<()> {
-        self.pending_blocks.lock().await.remove(block_hash);
+        self.clear_pending(block_hash).await;
+        Ok(())
+    }
+
+    pub async fn on_block_request_failed(&self, block_hash: &BlockHash) -> anyhow::Result<()> {
+        self.clear_pending(block_hash).await;
         Ok(())
     }
 
     async fn mark_pending(&self, block_hash: BlockHash) -> bool {
-        self.pending_blocks.lock().await.insert(block_hash)
+        let now = tokio::time::Instant::now();
+        let mut pending_blocks = self.pending_blocks.lock().await;
+        match pending_blocks.get(&block_hash) {
+            Some(started_at) if now.duration_since(*started_at) < PENDING_BLOCK_TIMEOUT => false,
+            _ => {
+                pending_blocks.insert(block_hash, now);
+                true
+            }
+        }
+    }
+
+    async fn clear_pending(&self, block_hash: &BlockHash) {
+        self.pending_blocks.lock().await.remove(block_hash);
     }
 }
 
@@ -202,6 +222,8 @@ mod tests {
             hash: BlockHash::from_u8(hash),
             parent_hash: None,
             height: 1,
+            producer: "validator".to_string(),
+            signature: vec![1],
             body: vec![1],
         }
     }
@@ -279,6 +301,49 @@ mod tests {
             .await?;
 
         assert!(request_rx.recv().await.is_some());
+        assert!(request_rx.recv().await.is_some());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn retries_after_request_failure() -> anyhow::Result<()> {
+        let (request_tx, mut request_rx) = mpsc::channel(4);
+        let sync = SyncService::new(
+            RecordingNetwork { request_tx },
+            ChainStore::new(),
+            RecordingReputation::default(),
+        );
+        let hash = BlockHash::from_u8(1);
+
+        sync.on_block_announcement(PeerId::from("peer-a"), announcement(1))
+            .await?;
+        sync.on_block_request_failed(&hash).await?;
+        sync.on_block_announcement(PeerId::from("peer-b"), announcement(1))
+            .await?;
+
+        assert!(request_rx.recv().await.is_some());
+        assert!(request_rx.recv().await.is_some());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn retries_after_pending_request_times_out() -> anyhow::Result<()> {
+        let (request_tx, mut request_rx) = mpsc::channel(4);
+        let sync = SyncService::new(
+            RecordingNetwork { request_tx },
+            ChainStore::new(),
+            RecordingReputation::default(),
+        );
+        let hash = BlockHash::from_u8(1);
+
+        sync.mark_pending(hash.clone()).await;
+        sync.pending_blocks
+            .lock()
+            .await
+            .insert(hash, tokio::time::Instant::now() - PENDING_BLOCK_TIMEOUT);
+        sync.on_block_announcement(PeerId::from("peer-a"), announcement(1))
+            .await?;
+
         assert!(request_rx.recv().await.is_some());
         Ok(())
     }

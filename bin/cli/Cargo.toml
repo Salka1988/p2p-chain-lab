@@ -5,11 +5,13 @@ edition = "2024"
 
 [dependencies]
 anyhow.workspace = true
+clap.workspace = true
 p2p-chain-lib-chain = { path = "../../crates/chain" }
 p2p-chain-lib-consensus = { path = "../../crates/consensus" }
 p2p-chain-lib-mempool = { path = "../../crates/mempool" }
 p2p-chain-lib-network = { path = "../../crates/network" }
 p2p-chain-lib-node = { path = "../../crates/node" }
+p2p-chain-lib-ports = { path = "../../crates/ports" }
 p2p-chain-lib-sync = { path = "../../crates/sync" }
 tokio.workspace = true
 tokio-util.workspace = true

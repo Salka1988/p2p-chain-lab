@@ -29,6 +29,15 @@ struct TestNetwork {
 
 impl TestNetwork {
     async fn start(name: &str, bootstrap_peers: Vec<PeerAddress>) -> anyhow::Result<Self> {
+        Self::start_with_limits(name, bootstrap_peers, 64, 16).await
+    }
+
+    async fn start_with_limits(
+        name: &str,
+        bootstrap_peers: Vec<PeerAddress>,
+        max_gossip_events_per_second: u16,
+        max_block_requests_per_second: u16,
+    ) -> anyhow::Result<Self> {
         let (event_tx, event_rx) = mpsc::channel(64);
         let (peer_score_command_tx, peer_score_command_rx) = mpsc::channel(64);
         let (peer_score_event_tx, peer_score_event_rx) = mpsc::channel(64);
@@ -51,6 +60,8 @@ impl TestNetwork {
                 node_key_seed: Some(name.to_string()),
                 validator_id: None,
                 validators: Vec::new(),
+                max_gossip_events_per_second,
+                max_block_requests_per_second,
             },
             event_tx,
             peer_score,
@@ -183,6 +194,8 @@ fn block(hash: u8, height: u64) -> Block {
         hash: BlockHash::from_u8(hash),
         parent_hash: None,
         height,
+        producer: "validator".to_string(),
+        signature: vec![1],
         body: vec![hash, hash + 1],
     }
 }
@@ -192,6 +205,48 @@ async fn two_services_connect_over_libp2p() -> anyhow::Result<()> {
     let (first, second, first_peer_id) = connected_pair().await?;
 
     assert!(!first_peer_id.as_str().is_empty());
+
+    second.stop().await?;
+    first.stop().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn disconnects_peer_that_exceeds_block_request_limit() -> anyhow::Result<()> {
+    let first_seed = "rate-limit-node-a";
+    let mut first = TestNetwork::start_with_limits(first_seed, Vec::new(), 64, 1).await?;
+    let first_addr = first.listening_addr().await?;
+    let first_bootstrap_addr = with_peer_id(first_addr, deterministic_peer_id(first_seed)?)?;
+    let mut second = TestNetwork::start("rate-limit-node-b", vec![first_bootstrap_addr]).await?;
+
+    let first_peer_id = second
+        .wait_for_event(|event| match event {
+            NetworkEvent::PeerConnected(peer_id) => Some(peer_id),
+            _ => None,
+        })
+        .await?;
+    let second_peer_id = first
+        .wait_for_event(|event| match event {
+            NetworkEvent::PeerConnected(peer_id) => Some(peer_id),
+            _ => None,
+        })
+        .await?;
+
+    second
+        .handle
+        .request_block(first_peer_id.clone(), BlockHash::from_u8(1))
+        .await?;
+    second
+        .handle
+        .request_block(first_peer_id, BlockHash::from_u8(2))
+        .await?;
+
+    first
+        .wait_for_event(|event| match event {
+            NetworkEvent::PeerDisconnected(peer_id) if peer_id == second_peer_id => Some(()),
+            _ => None,
+        })
+        .await?;
 
     second.stop().await?;
     first.stop().await?;
@@ -276,6 +331,45 @@ async fn request_response_fetches_block_from_connected_peer() -> anyhow::Result<
         .await?;
 
     assert_eq!(received, expected);
+
+    second.stop().await?;
+    first.stop().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn request_response_reports_missing_block() -> anyhow::Result<()> {
+    let (mut first, mut second, first_peer_id) = connected_pair().await?;
+    let block_hash = BlockHash::from_u8(99);
+
+    second
+        .handle
+        .request_block(first_peer_id, block_hash.clone())
+        .await?;
+
+    let request_peer_id = first
+        .wait_for_event(|event| match event {
+            NetworkEvent::BlockRequestReceived {
+                peer_id,
+                block_hash: requested_hash,
+            } if requested_hash == block_hash => Some(peer_id),
+            _ => None,
+        })
+        .await?;
+    first
+        .handle
+        .send_block_not_found(request_peer_id, block_hash.clone())
+        .await?;
+
+    second
+        .wait_for_event(|event| match event {
+            NetworkEvent::BlockNotFound {
+                block_hash: received_hash,
+                ..
+            } if received_hash == block_hash => Some(()),
+            _ => None,
+        })
+        .await?;
 
     second.stop().await?;
     first.stop().await?;

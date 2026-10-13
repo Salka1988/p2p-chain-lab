@@ -27,6 +27,8 @@ mod tests {
             hash: BlockHash::from_u8(hash),
             parent_hash: Some(BlockHash::from_u8(9)),
             height: 2,
+            producer: "validator".to_string(),
+            signature: vec![1; 64],
             body: vec![1, 2, 3],
         }
     }
@@ -74,7 +76,10 @@ mod tests {
 
     #[test]
     fn block_response_round_trips() -> anyhow::Result<()> {
-        let message = BlockResponse { block: block(1) };
+        let message = BlockResponse {
+            block_hash: BlockHash::from_u8(1),
+            block: Some(block(1)),
+        };
 
         let encoded = encode(&message)?;
         let decoded: BlockResponse = decode(&encoded)?;

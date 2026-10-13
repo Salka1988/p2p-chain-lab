@@ -45,5 +45,6 @@ pub struct BlockRequest {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BlockResponse {
-    pub block: Block,
+    pub block_hash: BlockHash,
+    pub block: Option<Block>,
 }

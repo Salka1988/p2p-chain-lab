@@ -6,6 +6,7 @@ edition.workspace = true
 [dependencies]
 anyhow.workspace = true
 async-trait.workspace = true
+ed25519-dalek.workspace = true
 libp2p.workspace = true
 serde.workspace = true
 p2p-chain-lib-chain = { path = "../chain" }

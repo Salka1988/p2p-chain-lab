@@ -1,19 +1,17 @@
+mod config;
 mod task_group;
 
 use std::time::Duration;
 
 use crate::task_group::TaskGroup;
 use p2p_chain_lib_chain::store::ChainStore;
-use p2p_chain_lib_consensus::SimpleConsensus;
+use p2p_chain_lib_consensus::{SimpleConsensus, validator_id_from_seed};
 use p2p_chain_lib_mempool::Mempool;
 use p2p_chain_lib_network::{
     peer_score::{PeerScoreActor, PeerScoreHandle},
     service::{NetworkConfig, NetworkService},
 };
-use p2p_chain_lib_node::{
-    config::Config,
-    node::{Node, NodeRuntime},
-};
+use p2p_chain_lib_node::node::{Node, NodeRuntime};
 use p2p_chain_lib_sync::SyncService;
 use tracing_subscriber::EnvFilter;
 
@@ -21,18 +19,20 @@ use tracing_subscriber::EnvFilter;
 async fn main() -> anyhow::Result<()> {
     init_tracing();
 
-    let config = Config::from_args()?;
+    let config = config::from_args()?;
     let block_production_interval = config.block_production_interval;
-    let consensus_node_id = config
-        .node_key_seed
-        .clone()
-        .unwrap_or_else(|| config.listen_addr.as_str().to_string());
+    let consensus_seed = config.node_key_seed.as_deref().ok_or_else(|| {
+        anyhow::anyhow!("--node-key-seed is required for signed block production")
+    })?;
+    let consensus_node_id = validator_id_from_seed(consensus_seed);
     let network_config = NetworkConfig {
         listen_addr: config.listen_addr.clone(),
         bootstrap_peers: config.bootstrap_peers.clone(),
         node_key_seed: config.node_key_seed.clone(),
         validator_id: Some(consensus_node_id.clone()),
         validators: config.validators.clone(),
+        max_gossip_events_per_second: config.max_gossip_events_per_second,
+        max_block_requests_per_second: config.max_block_requests_per_second,
     };
     let mut task_group = TaskGroup::new().with_shutdown_timeout(Duration::from_secs(5));
     let (network_event_tx, network_event_rx) = tokio::sync::mpsc::channel(1024);
@@ -50,7 +50,7 @@ async fn main() -> anyhow::Result<()> {
         peer_score_event_rx,
     )?;
     let consensus =
-        SimpleConsensus::with_validators(consensus_node_id, chain_store.clone(), config.validators);
+        SimpleConsensus::with_validators(consensus_seed, chain_store.clone(), config.validators)?;
     let sync = SyncService::new(network.clone(), chain_store.clone(), peer_score.clone());
     let network_cancellation_token = task_group.child_token();
     let peer_score_cancellation_token = task_group.child_token();

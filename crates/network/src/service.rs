@@ -1,10 +1,11 @@
 use std::{
-    collections::{BTreeSet, HashMap},
+    collections::{BTreeSet, HashMap, HashSet, VecDeque},
     time::Duration,
 };
 
 use anyhow::Context;
 use async_trait::async_trait;
+use ed25519_dalek::SigningKey;
 use libp2p::{
     Multiaddr, Swarm, SwarmBuilder,
     futures::StreamExt,
@@ -15,9 +16,7 @@ use libp2p::{
     swarm::SwarmEvent,
 };
 use p2p_chain_lib_chain::block::{Block, BlockHash};
-use p2p_chain_lib_ports::{
-    BlockBroadcastPort, BlockRequestPort, BlockSendPort, NetworkEvent, NetworkStatusPort, PeerId,
-};
+use p2p_chain_lib_ports::{BlockRequestPort, NetworkEvent, PeerId};
 use p2p_chain_lib_protocol::{
     codec,
     messages::{BlockAnnouncement, BlockRequest, BlockResponse, Transaction},
@@ -34,6 +33,12 @@ use crate::{
 };
 
 const DEFAULT_COMMAND_BUFFER: usize = 1024;
+const MAX_PENDING_CRITICAL_EVENTS: usize = 1024;
+const MAX_PENDING_BEST_EFFORT_EVENTS: usize = 1024;
+const RATE_LIMIT_WINDOW: Duration = Duration::from_secs(1);
+pub const DEFAULT_MAX_GOSSIP_EVENTS_PER_SECOND: u16 = 64;
+pub const DEFAULT_MAX_BLOCK_REQUESTS_PER_SECOND: u16 = 16;
+const MAX_TRACKED_RATE_LIMIT_PEERS: usize = 4096;
 
 #[derive(Debug, Clone)]
 pub struct NetworkConfig {
@@ -42,6 +47,8 @@ pub struct NetworkConfig {
     pub node_key_seed: Option<String>,
     pub validator_id: Option<String>,
     pub validators: Vec<String>,
+    pub max_gossip_events_per_second: u16,
+    pub max_block_requests_per_second: u16,
 }
 
 #[derive(Debug, Clone)]
@@ -91,14 +98,25 @@ impl NetworkHandle {
     }
 
     pub async fn send_block(&self, peer_id: PeerId, block: Block) -> anyhow::Result<()> {
-        self.send(NetworkCommand::SendBlock { peer_id, block })
-            .await
+        self.send(NetworkCommand::SendBlock {
+            peer_id,
+            block_hash: block.hash.clone(),
+            block: Some(block),
+        })
+        .await
     }
-}
 
-impl NetworkStatusPort for NetworkHandle {
-    fn listen_addr(&self) -> &str {
-        self.listen_addr()
+    pub async fn send_block_not_found(
+        &self,
+        peer_id: PeerId,
+        block_hash: BlockHash,
+    ) -> anyhow::Result<()> {
+        self.send(NetworkCommand::SendBlock {
+            peer_id,
+            block_hash,
+            block: None,
+        })
+        .await
     }
 }
 
@@ -109,29 +127,144 @@ impl BlockRequestPort for NetworkHandle {
     }
 }
 
-#[async_trait]
-impl BlockSendPort for NetworkHandle {
-    async fn send_block(&self, peer_id: PeerId, block: Block) -> anyhow::Result<()> {
-        self.send_block(peer_id, block).await
-    }
-}
-
-#[async_trait]
-impl BlockBroadcastPort for NetworkHandle {
-    async fn broadcast_block(&self, block: Block) -> anyhow::Result<()> {
-        self.broadcast_block(block).await
-    }
-}
-
 pub struct NetworkService {
     config: NetworkConfig,
     command_rx: mpsc::Receiver<NetworkCommand>,
     event_tx: mpsc::Sender<NetworkEvent>,
     peer_score: PeerScoreHandle,
     peer_score_event_rx: mpsc::Receiver<PeerScoreEvent>,
+    pending_node_events: PendingNodeEvents,
+    peer_rate_limiter: PeerRateLimiter,
+    rejected_peers: HashSet<PeerId>,
 }
 
 type BlockResponseChannel = request_response::ResponseChannel<BlockResponse>;
+
+#[derive(Default)]
+struct PendingBlockRequests {
+    responses: HashMap<(PeerId, BlockHash), BlockResponseChannel>,
+    outbound: HashMap<request_response::OutboundRequestId, BlockHash>,
+}
+
+#[derive(Default)]
+struct PendingNodeEvents {
+    critical: VecDeque<NetworkEvent>,
+    best_effort: VecDeque<NetworkEvent>,
+}
+
+#[derive(Default)]
+struct PeerRateLimiter {
+    peers: HashMap<PeerId, PeerRateWindow>,
+    last_pruned_at: Option<tokio::time::Instant>,
+}
+
+struct PeerRateWindow {
+    started_at: tokio::time::Instant,
+    gossip_events: u16,
+    block_requests: u16,
+}
+
+#[derive(Clone, Copy)]
+enum IngressKind {
+    Gossip,
+    BlockRequest,
+}
+
+impl PeerRateLimiter {
+    fn allow(
+        &mut self,
+        peer_id: PeerId,
+        kind: IngressKind,
+        max_gossip_events: u16,
+        max_block_requests: u16,
+    ) -> bool {
+        let now = tokio::time::Instant::now();
+        if self
+            .last_pruned_at
+            .is_none_or(|last_pruned_at| now.duration_since(last_pruned_at) >= RATE_LIMIT_WINDOW)
+        {
+            self.peers
+                .retain(|_, window| now.duration_since(window.started_at) < RATE_LIMIT_WINDOW);
+            self.last_pruned_at = Some(now);
+        }
+        if !self.peers.contains_key(&peer_id) && self.peers.len() == MAX_TRACKED_RATE_LIMIT_PEERS {
+            return false;
+        }
+        let window = self.peers.entry(peer_id).or_insert(PeerRateWindow {
+            started_at: now,
+            gossip_events: 0,
+            block_requests: 0,
+        });
+        let counter = match kind {
+            IngressKind::Gossip => &mut window.gossip_events,
+            IngressKind::BlockRequest => &mut window.block_requests,
+        };
+        let limit = match kind {
+            IngressKind::Gossip => max_gossip_events,
+            IngressKind::BlockRequest => max_block_requests,
+        };
+        if *counter == limit {
+            return false;
+        }
+        *counter += 1;
+        true
+    }
+}
+
+impl PendingNodeEvents {
+    fn push(&mut self, event: NetworkEvent) -> Option<NetworkEvent> {
+        let (queue, limit) = if is_critical_event(&event) {
+            (&mut self.critical, MAX_PENDING_CRITICAL_EVENTS)
+        } else {
+            (&mut self.best_effort, MAX_PENDING_BEST_EFFORT_EVENTS)
+        };
+        if queue.len() == limit {
+            return Some(event);
+        }
+        queue.push_back(event);
+        None
+    }
+
+    fn pop(&mut self) -> Option<NetworkEvent> {
+        self.critical
+            .pop_front()
+            .or_else(|| self.best_effort.pop_front())
+    }
+
+    fn push_front(&mut self, event: NetworkEvent) {
+        if is_critical_event(&event) {
+            self.critical.push_front(event);
+        } else {
+            self.best_effort.push_front(event);
+        }
+    }
+}
+
+fn is_critical_event(event: &NetworkEvent) -> bool {
+    matches!(
+        event,
+        NetworkEvent::BlockReceived { .. }
+            | NetworkEvent::BlockNotFound { .. }
+            | NetworkEvent::BlockRequestFailed { .. }
+            | NetworkEvent::BlockRequestReceived { .. }
+    )
+}
+
+fn event_peer_id(event: &NetworkEvent) -> Option<&PeerId> {
+    match event {
+        NetworkEvent::TransactionReceived { peer_id, .. }
+        | NetworkEvent::BlockAnnouncementReceived { peer_id, .. }
+        | NetworkEvent::BlockReceived { peer_id, .. }
+        | NetworkEvent::BlockNotFound { peer_id, .. }
+        | NetworkEvent::BlockRequestFailed { peer_id, .. }
+        | NetworkEvent::BlockRequestReceived { peer_id, .. }
+        | NetworkEvent::PeerMisbehaved { peer_id, .. } => Some(peer_id),
+        NetworkEvent::PeerConnected(peer_id)
+        | NetworkEvent::PeerDisconnected(peer_id)
+        | NetworkEvent::PeerDiscovered(peer_id) => Some(peer_id),
+        NetworkEvent::Listening(_) => None,
+    }
+}
 
 impl NetworkService {
     pub fn new(
@@ -148,6 +281,9 @@ impl NetworkService {
             event_tx,
             peer_score,
             peer_score_event_rx,
+            pending_node_events: PendingNodeEvents::default(),
+            peer_rate_limiter: PeerRateLimiter::default(),
+            rejected_peers: HashSet::new(),
         };
 
         Ok((service, handle))
@@ -155,13 +291,15 @@ impl NetworkService {
 
     pub async fn run(mut self, cancellation_token: CancellationToken) -> anyhow::Result<()> {
         let mut swarm = self.build_swarm().await?;
-        let mut pending_block_responses = HashMap::new();
+        let mut pending_block_requests = PendingBlockRequests::default();
+        let mut banned_peers = HashSet::new();
         let mut local_validator_addresses = BTreeSet::new();
         let mut pending_validator_lookups = HashMap::new();
         let mut discovery_ticker = tokio::time::interval_at(
             tokio::time::Instant::now() + Duration::from_secs(30),
             Duration::from_secs(30),
         );
+        let mut event_delivery_ticker = tokio::time::interval(Duration::from_millis(10));
 
         tracing::info!(
             listen_addr = %self.config.listen_addr,
@@ -179,7 +317,7 @@ impl NetworkService {
                         Some(command) => {
                             self.handle_command(
                                 &mut swarm,
-                                &mut pending_block_responses,
+                                &mut pending_block_requests,
                                 command,
                             ).await?;
                         }
@@ -189,15 +327,16 @@ impl NetworkService {
                 event = swarm.select_next_some() => {
                     self.handle_swarm_event(
                         &mut swarm,
-                        &mut pending_block_responses,
+                        &mut pending_block_requests,
                         &mut local_validator_addresses,
                         &mut pending_validator_lookups,
+                        &banned_peers,
                         event,
                     ).await?;
                 }
                 event = self.peer_score_event_rx.recv() => {
                     match event {
-                        Some(event) => self.handle_peer_score_event(&mut swarm, event).await?,
+                        Some(event) => self.handle_peer_score_event(&mut swarm, &mut banned_peers, event).await?,
                         None => break,
                     }
                 }
@@ -208,6 +347,9 @@ impl NetworkService {
                         &local_validator_addresses,
                         &mut pending_validator_lookups,
                     ).await?;
+                }
+                _ = event_delivery_ticker.tick() => {
+                    self.flush_node_events()?;
                 }
             }
         }
@@ -296,10 +438,107 @@ impl NetworkService {
             .context("failed to build deterministic ed25519 keypair from node key seed")
     }
 
+    fn validator_signing_key(&self) -> anyhow::Result<SigningKey> {
+        let seed = self
+            .config
+            .node_key_seed
+            .as_deref()
+            .context("node key seed is required to sign validator records")?;
+        let bytes: [u8; 32] = Sha256::digest(seed.as_bytes()).into();
+        Ok(SigningKey::from_bytes(&bytes))
+    }
+
+    async fn emit_event(
+        &mut self,
+        swarm: &mut Swarm<NetworkBehaviour>,
+        source_peer_id: Option<PeerId>,
+        event: NetworkEvent,
+    ) -> anyhow::Result<()> {
+        self.flush_node_events()?;
+        match self.event_tx.try_send(event) {
+            Ok(()) => Ok(()),
+            Err(mpsc::error::TrySendError::Full(event)) => {
+                let peer_id = source_peer_id.or_else(|| event_peer_id(&event).cloned());
+                if let Some(event) = self.pending_node_events.push(event) {
+                    if let Some(peer_id) = peer_id {
+                        tracing::warn!(%peer_id, ?event, "rejecting peer because node event queues are full");
+                        self.reject_peer(swarm, peer_id, "node event queues are full")
+                            .await?;
+                    } else {
+                        tracing::warn!(
+                            ?event,
+                            "dropping local network event because its priority queue is full"
+                        );
+                    }
+                }
+                Ok(())
+            }
+            Err(mpsc::error::TrySendError::Closed(_)) => {
+                anyhow::bail!("node event receiver closed")
+            }
+        }
+    }
+
+    fn can_accept_critical_event(&self) -> bool {
+        self.event_tx.capacity() > 0
+            || self.pending_node_events.critical.len() < MAX_PENDING_CRITICAL_EVENTS
+    }
+
+    async fn reject_peer(
+        &mut self,
+        swarm: &mut Swarm<NetworkBehaviour>,
+        peer_id: PeerId,
+        reason: &str,
+    ) -> anyhow::Result<()> {
+        self.rejected_peers.insert(peer_id.clone());
+        if let Ok(libp2p_peer_id) = peer_id.as_str().parse() {
+            let _ = swarm.disconnect_peer_id(libp2p_peer_id);
+        }
+        self.peer_score
+            .failed_request(peer_id, reason.to_string())
+            .await
+    }
+
+    async fn admit_peer_event(
+        &mut self,
+        swarm: &mut Swarm<NetworkBehaviour>,
+        peer_id: PeerId,
+        kind: IngressKind,
+    ) -> anyhow::Result<bool> {
+        if self.peer_rate_limiter.allow(
+            peer_id.clone(),
+            kind,
+            self.config.max_gossip_events_per_second,
+            self.config.max_block_requests_per_second,
+        ) {
+            return Ok(true);
+        }
+        tracing::warn!(%peer_id, "rejecting peer because ingress rate limit was exceeded");
+        self.reject_peer(swarm, peer_id, "ingress rate limit exceeded")
+            .await?;
+        Ok(false)
+    }
+
+    fn flush_node_events(&mut self) -> anyhow::Result<()> {
+        while let Some(event) = self.pending_node_events.pop() {
+            match self.event_tx.try_send(event) {
+                Ok(()) => {}
+                Err(mpsc::error::TrySendError::Full(event)) => {
+                    self.pending_node_events.push_front(event);
+                    break;
+                }
+                Err(mpsc::error::TrySendError::Closed(_)) => {
+                    anyhow::bail!("node event receiver closed");
+                }
+            }
+        }
+        Ok(())
+    }
+
     async fn handle_command(
         &self,
         swarm: &mut Swarm<NetworkBehaviour>,
-        pending_block_responses: &mut HashMap<(PeerId, BlockHash), BlockResponseChannel>,
+        pending_block_requests: &mut PendingBlockRequests,
         command: NetworkCommand,
     ) -> anyhow::Result<()> {
         match command {
@@ -330,24 +569,34 @@ impl NetworkService {
                     .as_str()
                     .parse()
                     .with_context(|| format!("invalid peer id for block request: {peer_id}"))?;
-                swarm
-                    .behaviour_mut()
-                    .block_request_response
-                    .send_request(&libp2p_peer_id, BlockRequest { block_hash });
+                let request_id = swarm.behaviour_mut().block_request_response.send_request(
+                    &libp2p_peer_id,
+                    BlockRequest {
+                        block_hash: block_hash.clone(),
+                    },
+                );
+                pending_block_requests
+                    .outbound
+                    .insert(request_id, block_hash);
             }
-            NetworkCommand::SendBlock { peer_id, block } => {
-                let Some(channel) =
-                    pending_block_responses.remove(&(peer_id.clone(), block.hash.clone()))
+            NetworkCommand::SendBlock {
+                peer_id,
+                block_hash,
+                block,
+            } => {
+                let Some(channel) = pending_block_requests
+                    .responses
+                    .remove(&(peer_id.clone(), block_hash.clone()))
                 else {
                     tracing::warn!(
                         %peer_id,
-                        block_hash = %block.hash,
+                        %block_hash,
                         "no pending block response channel",
                     );
                     return Ok(());
                 };
 
-                let response = BlockResponse { block };
+                let response = BlockResponse { block_hash, block };
                 if swarm
                     .behaviour_mut()
                     .block_request_response
@@ -363,11 +612,12 @@ impl NetworkService {
     }
 
     async fn handle_swarm_event(
-        &self,
+        &mut self,
         swarm: &mut Swarm<NetworkBehaviour>,
-        pending_block_responses: &mut HashMap<(PeerId, BlockHash), BlockResponseChannel>,
+        pending_block_requests: &mut PendingBlockRequests,
         local_validator_addresses: &mut BTreeSet<String>,
         pending_validator_lookups: &mut HashMap<kad::QueryId, String>,
+        banned_peers: &HashSet<PeerId>,
         event: SwarmEvent<NetworkBehaviourEvent>,
     ) -> anyhow::Result<()> {
         match event {
@@ -377,25 +627,32 @@ impl NetworkService {
                     self.publish_validator_record(swarm, local_validator_addresses)
                         .await?;
                 }
-                self.event_tx
-                    .send(NetworkEvent::Listening(PeerAddress::from(
-                        address.to_string(),
-                    )))
-                    .await?;
+                self.emit_event(
+                    swarm,
+                    None,
+                    NetworkEvent::Listening(PeerAddress::from(address.to_string())),
+                )
+                .await?;
             }
             SwarmEvent::ConnectionEstablished {
                 peer_id, endpoint, ..
             } => {
+                let peer_id_string = PeerId::from(peer_id.to_string());
+                if banned_peers.contains(&peer_id_string)
+                    || self.rejected_peers.contains(&peer_id_string)
+                {
+                    tracing::warn!(%peer_id_string, "rejecting banned peer connection");
+                    let _ = swarm.disconnect_peer_id(peer_id);
+                    return Ok(());
+                }
                 let address = endpoint.get_remote_address().clone();
                 swarm.add_peer_address(peer_id, address.clone());
                 swarm
                     .behaviour_mut()
                     .kademlia
                     .add_address(&peer_id, address);
-                let peer_id = PeerId::from(peer_id.to_string());
-                self.peer_score.connected(peer_id.clone()).await?;
-                self.event_tx
-                    .send(NetworkEvent::PeerConnected(peer_id))
+                self.peer_score.connected(peer_id_string.clone()).await?;
+                self.emit_event(swarm, None, NetworkEvent::PeerConnected(peer_id_string))
                     .await?;
             }
             SwarmEvent::ConnectionClosed {
@@ -405,8 +662,7 @@ impl NetworkService {
             } => {
                 let peer_id = PeerId::from(peer_id.to_string());
                 self.peer_score.disconnected(peer_id.clone()).await?;
-                self.event_tx
-                    .send(NetworkEvent::PeerDisconnected(peer_id))
+                self.emit_event(swarm, None, NetworkEvent::PeerDisconnected(peer_id))
                     .await?;
             }
             SwarmEvent::ConnectionClosed { .. } => {
@@ -419,13 +675,13 @@ impl NetworkService {
                 tracing::warn!(?peer_id, ?error, "incoming connection failed");
             }
             SwarmEvent::Behaviour(NetworkBehaviourEvent::Gossipsub(event)) => {
-                self.handle_gossipsub_event(event).await?;
+                self.handle_gossipsub_event(swarm, event).await?;
             }
             SwarmEvent::Behaviour(NetworkBehaviourEvent::Identify(event)) => {
                 self.handle_identify_event(swarm, event).await?;
             }
             SwarmEvent::Behaviour(NetworkBehaviourEvent::BlockRequestResponse(event)) => {
-                self.handle_block_request_response_event(swarm, pending_block_responses, event)
+                self.handle_block_request_response_event(swarm, pending_block_requests, event)
                     .await?;
             }
             SwarmEvent::Behaviour(NetworkBehaviourEvent::Ping(event)) => {
@@ -485,7 +741,7 @@ impl NetworkService {
     }
 
     async fn handle_kademlia_event(
-        &self,
+        &mut self,
         swarm: &mut Swarm<NetworkBehaviour>,
         event: kad::Event,
         pending_validator_lookups: &mut HashMap<kad::QueryId, String>,
@@ -506,8 +762,7 @@ impl NetworkService {
                     ?old_peer,
                     "kademlia routing updated"
                 );
-                self.event_tx
-                    .send(NetworkEvent::PeerDiscovered(peer_id))
+                self.emit_event(swarm, None, NetworkEvent::PeerDiscovered(peer_id))
                     .await?;
             }
             kad::Event::OutboundQueryProgressed {
@@ -554,8 +809,12 @@ impl NetworkService {
                             || String::from_utf8_lossy(record.record.key.as_ref()).to_string(),
                         )
                     });
-                    self.handle_validator_record_lookup(swarm, &validator_id, record.record.value)
-                        .await?;
+                    if let Err(error) = self
+                        .handle_validator_record_lookup(swarm, &validator_id, record.record.value)
+                        .await
+                    {
+                        tracing::warn!(?error, validator_id = %validator_id, "discarding invalid validator record");
+                    }
                 }
                 Ok(kad::GetRecordOk::FinishedWithNoAdditionalRecord { .. }) => {
                     if let Some(validator_id) = pending_validator_lookups.remove(&id) {
@@ -664,7 +923,8 @@ impl NetworkService {
             validator_id.clone(),
             *swarm.local_peer_id(),
             addresses,
-        );
+            &self.validator_signing_key()?,
+        )?;
         let value = crate::validator_directory::encode_record(&record)?;
         let record = kad::Record::new(crate::validator_directory::record_key(validator_id), value);
         match swarm
@@ -723,6 +983,12 @@ impl NetworkService {
     ) -> anyhow::Result<()> {
         let record = crate::validator_directory::decode_record(&value)
             .with_context(|| format!("invalid validator record for {validator_id}"))?;
+        anyhow::ensure!(
+            record.validator_id == validator_id,
+            "validator record identity does not match its lookup key"
+        );
+        crate::validator_directory::verify_record(&record)
+            .with_context(|| format!("invalid validator record signature for {validator_id}"))?;
 
         let peer_id: libp2p::PeerId = record
             .peer_id
@@ -786,28 +1052,37 @@ impl NetworkService {
     }
 
     async fn handle_peer_score_event(
-        &self,
+        &mut self,
         swarm: &mut Swarm<NetworkBehaviour>,
+        banned_peers: &mut HashSet<PeerId>,
         event: PeerScoreEvent,
     ) -> anyhow::Result<()> {
         match event {
             PeerScoreEvent::PeerBanned { peer_id, reason } => {
                 tracing::warn!(%peer_id, %reason, "peer banned");
+                banned_peers.insert(peer_id.clone());
                 if let Ok(libp2p_peer_id) = peer_id.as_str().parse()
                     && let Err(error) = swarm.disconnect_peer_id(libp2p_peer_id)
                 {
                     tracing::debug!(%peer_id, ?error, "failed to disconnect banned peer");
                 }
-                self.event_tx
-                    .send(NetworkEvent::PeerMisbehaved { peer_id, reason })
-                    .await?;
+                self.emit_event(
+                    swarm,
+                    None,
+                    NetworkEvent::PeerMisbehaved { peer_id, reason },
+                )
+                .await?;
             }
         }
 
         Ok(())
     }
 
-    async fn handle_gossipsub_event(&self, event: gossipsub::Event) -> anyhow::Result<()> {
+    async fn handle_gossipsub_event(
+        &mut self,
+        swarm: &mut Swarm<NetworkBehaviour>,
+        event: gossipsub::Event,
+    ) -> anyhow::Result<()> {
         let gossipsub::Event::Message {
             propagation_source,
             message,
@@ -819,7 +1094,14 @@ impl NetworkService {
 
         let message_source = message.source.unwrap_or(propagation_source);
         let peer_id = PeerId::from(message_source.to_string());
+        let ingress_peer_id = PeerId::from(propagation_source.to_string());
         if message.topic == gossipsub::IdentTopic::new(TX_TOPIC).hash() {
+            if !self
+                .admit_peer_event(swarm, ingress_peer_id.clone(), IngressKind::Gossip)
+                .await?
+            {
+                return Ok(());
+            }
             let tx = match codec::decode::<Transaction>(&message.data) {
                 Ok(tx) => tx,
                 Err(error) => {
@@ -829,10 +1111,19 @@ impl NetworkService {
                     return Ok(());
                 }
             };
-            self.event_tx
-                .send(NetworkEvent::TransactionReceived { peer_id, tx })
-                .await?;
+            self.emit_event(
+                swarm,
+                Some(ingress_peer_id),
+                NetworkEvent::TransactionReceived { peer_id, tx },
+            )
+            .await?;
         } else if message.topic == gossipsub::IdentTopic::new(BLOCK_ANNOUNCEMENT_TOPIC).hash() {
+            if !self
+                .admit_peer_event(swarm, ingress_peer_id.clone(), IngressKind::Gossip)
+                .await?
+            {
+                return Ok(());
+            }
             let announcement = match codec::decode::<BlockAnnouncement>(&message.data) {
                 Ok(announcement) => announcement,
                 Err(error) => {
@@ -845,21 +1136,24 @@ impl NetworkService {
                     return Ok(());
                 }
             };
-            self.event_tx
-                .send(NetworkEvent::BlockAnnouncementReceived {
+            self.emit_event(
+                swarm,
+                Some(ingress_peer_id),
+                NetworkEvent::BlockAnnouncementReceived {
                     peer_id,
                     announcement,
-                })
-                .await?;
+                },
+            )
+            .await?;
         }
 
         Ok(())
     }
 
     async fn handle_block_request_response_event(
-        &self,
-        _swarm: &mut Swarm<NetworkBehaviour>,
-        pending_block_responses: &mut HashMap<(PeerId, BlockHash), BlockResponseChannel>,
+        &mut self,
+        swarm: &mut Swarm<NetworkBehaviour>,
+        pending_block_requests: &mut PendingBlockRequests,
         event: request_response::Event<BlockRequest, BlockResponse>,
     ) -> anyhow::Result<()> {
         match event {
@@ -868,28 +1162,68 @@ impl NetworkService {
                     request, channel, ..
                 } => {
                     let peer_id = PeerId::from(peer.to_string());
-                    pending_block_responses
+                    if !self
+                        .admit_peer_event(swarm, peer_id.clone(), IngressKind::BlockRequest)
+                        .await?
+                    {
+                        return Ok(());
+                    }
+                    if !self.can_accept_critical_event() {
+                        tracing::warn!(%peer_id, block_hash = %request.block_hash, "rejecting block request because node event queues are full");
+                        self.reject_peer(swarm, peer_id, "node event queues are full")
+                            .await?;
+                        return Ok(());
+                    }
+                    pending_block_requests
+                        .responses
                         .insert((peer_id.clone(), request.block_hash.clone()), channel);
-                    self.event_tx
-                        .send(NetworkEvent::BlockRequestReceived {
+                    self.emit_event(
+                        swarm,
+                        None,
+                        NetworkEvent::BlockRequestReceived {
                             peer_id,
                             block_hash: request.block_hash,
-                        })
-                        .await?;
+                        },
+                    )
+                    .await?;
                 }
-                request_response::Message::Response { response, .. } => {
+                request_response::Message::Response {
+                    request_id,
+                    response,
+                } => {
+                    pending_block_requests.outbound.remove(&request_id);
+                    let Some(block) = response.block else {
+                        self.emit_event(
+                            swarm,
+                            None,
+                            NetworkEvent::BlockNotFound {
+                                peer_id: PeerId::from(peer.to_string()),
+                                block_hash: response.block_hash,
+                            },
+                        )
+                        .await?;
+                        return Ok(());
+                    };
                     self.peer_score
                         .useful_response(PeerId::from(peer.to_string()))
                         .await?;
-                    self.event_tx
-                        .send(NetworkEvent::BlockReceived {
+                    self.emit_event(
+                        swarm,
+                        None,
+                        NetworkEvent::BlockReceived {
                             peer_id: PeerId::from(peer.to_string()),
-                            block: response.block,
-                        })
-                        .await?;
+                            block,
+                        },
+                    )
+                    .await?;
                 }
             },
-            request_response::Event::OutboundFailure { peer, error, .. } => {
+            request_response::Event::OutboundFailure {
+                peer,
+                request_id,
+                error,
+                ..
+            } => {
                 tracing::warn!(peer_id = %peer, ?error, "block request failed");
                 self.peer_score
                     .failed_request(
@@ -897,6 +1231,17 @@ impl NetworkService {
                         format!("block request failed: {error}"),
                     )
                     .await?;
+                if let Some(block_hash) = pending_block_requests.outbound.remove(&request_id) {
+                    self.emit_event(
+                        swarm,
+                        None,
+                        NetworkEvent::BlockRequestFailed {
+                            peer_id: PeerId::from(peer.to_string()),
+                            block_hash,
+                        },
+                    )
+                    .await?;
+                }
             }
             request_response::Event::InboundFailure { peer, error, .. } => {
                 tracing::warn!(peer_id = %peer, ?error, "inbound block request failed");
@@ -942,6 +1287,8 @@ mod tests {
                 node_key_seed: seed.map(ToOwned::to_owned),
                 validator_id: None,
                 validators: Vec::new(),
+                max_gossip_events_per_second: DEFAULT_MAX_GOSSIP_EVENTS_PER_SECOND,
+                max_block_requests_per_second: DEFAULT_MAX_BLOCK_REQUESTS_PER_SECOND,
             },
             event_tx,
             PeerScoreHandle::new(peer_score_command_tx),
@@ -969,5 +1316,65 @@ mod tests {
         assert_eq!(first, second);
         assert_ne!(first, third);
         Ok(())
+    }
+
+    #[test]
+    fn prioritizes_critical_events_over_best_effort_events() {
+        let mut events = PendingNodeEvents::default();
+        for index in 0..MAX_PENDING_BEST_EFFORT_EVENTS {
+            assert!(
+                events
+                    .push(NetworkEvent::PeerConnected(PeerId::from(format!(
+                        "peer-{index}"
+                    ))))
+                    .is_none()
+            );
+        }
+        assert!(
+            events
+                .push(NetworkEvent::BlockRequestFailed {
+                    peer_id: PeerId::from("peer-b"),
+                    block_hash: BlockHash::from_u8(1),
+                })
+                .is_none()
+        );
+        assert!(matches!(
+            events.pop(),
+            Some(NetworkEvent::BlockRequestFailed { peer_id, block_hash })
+                if peer_id == PeerId::from("peer-b") && block_hash == BlockHash::from_u8(1)
+        ));
+    }
+
+    #[test]
+    fn rate_limits_each_peer_and_ingress_kind_independently() {
+        let mut limiter = PeerRateLimiter::default();
+        let peer_a = PeerId::from("peer-a");
+
+        for _ in 0..DEFAULT_MAX_GOSSIP_EVENTS_PER_SECOND {
+            assert!(limiter.allow(
+                peer_a.clone(),
+                IngressKind::Gossip,
+                DEFAULT_MAX_GOSSIP_EVENTS_PER_SECOND,
+                DEFAULT_MAX_BLOCK_REQUESTS_PER_SECOND,
+            ));
+        }
+        assert!(!limiter.allow(
+            peer_a.clone(),
+            IngressKind::Gossip,
+            DEFAULT_MAX_GOSSIP_EVENTS_PER_SECOND,
+            DEFAULT_MAX_BLOCK_REQUESTS_PER_SECOND,
+        ));
+        assert!(limiter.allow(
+            peer_a.clone(),
+            IngressKind::BlockRequest,
+            DEFAULT_MAX_GOSSIP_EVENTS_PER_SECOND,
+            DEFAULT_MAX_BLOCK_REQUESTS_PER_SECOND,
+        ));
+        assert!(limiter.allow(
+            PeerId::from("peer-b"),
+            IngressKind::Gossip,
+            DEFAULT_MAX_GOSSIP_EVENTS_PER_SECOND,
+            DEFAULT_MAX_BLOCK_REQUESTS_PER_SECOND,
+        ));
     }
 }

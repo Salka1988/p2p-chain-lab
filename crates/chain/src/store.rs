@@ -63,6 +63,8 @@ mod tests {
             hash: BlockHash::from_u8(hash),
             parent_hash: None,
             height: 1,
+            producer: "validator".to_string(),
+            signature: vec![1],
             body: vec![1],
         }
     }

@@ -81,6 +81,14 @@ pub enum NetworkEvent {
         peer_id: PeerId,
         block: Block,
     },
+    BlockNotFound {
+        peer_id: PeerId,
+        block_hash: BlockHash,
+    },
+    BlockRequestFailed {
+        peer_id: PeerId,
+        block_hash: BlockHash,
+    },
     BlockRequestReceived {
         peer_id: PeerId,
         block_hash: BlockHash,
@@ -94,23 +102,9 @@ pub enum NetworkEvent {
     },
 }
 
-pub trait NetworkStatusPort: Clone + Send + Sync + 'static {
-    fn listen_addr(&self) -> &str;
-}
-
 #[async_trait]
 pub trait BlockRequestPort: Clone + Send + Sync + 'static {
     async fn request_block(&self, peer_id: PeerId, block_hash: BlockHash) -> anyhow::Result<()>;
-}
-
-#[async_trait]
-pub trait BlockSendPort: Clone + Send + Sync + 'static {
-    async fn send_block(&self, peer_id: PeerId, block: Block) -> anyhow::Result<()>;
-}
-
-#[async_trait]
-pub trait BlockBroadcastPort: Clone + Send + Sync + 'static {
-    async fn broadcast_block(&self, block: Block) -> anyhow::Result<()>;
 }
 
 #[async_trait]

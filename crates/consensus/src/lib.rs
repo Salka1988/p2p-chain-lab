@@ -1,4 +1,4 @@
-use async_trait::async_trait;
+use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use p2p_chain_lib_chain::{
     block::{Block, BlockHash},
     store::BlockStorePort,
@@ -42,15 +42,10 @@ pub enum ConsensusCommand {
     },
 }
 
-#[async_trait]
-pub trait ConsensusPort: Clone + Send + Sync + 'static {
-    async fn handle_event(&self, event: ConsensusEvent) -> anyhow::Result<Vec<ConsensusCommand>>;
-}
-
 #[derive(Debug, Clone)]
 pub struct SimpleConsensus<C> {
-    node_id: String,
-    validators: Vec<String>,
+    signing_key: SigningKey,
+    validator_keys: Vec<VerifyingKey>,
     chain_store: C,
     producer_state: std::sync::Arc<Mutex<ProducerState>>,
 }
@@ -65,51 +60,63 @@ impl<C> SimpleConsensus<C>
 where
     C: BlockStorePort,
 {
-    pub fn new(node_id: impl Into<String>, chain_store: C) -> Self {
-        let node_id = node_id.into();
-        Self::with_validators(node_id.clone(), chain_store, vec![node_id])
+    pub fn new(node_key_seed: impl AsRef<str>, chain_store: C) -> Self {
+        Self::with_validators(node_key_seed, chain_store, Vec::new())
+            .expect("an empty validator set always uses the local validator")
     }
 
     pub fn with_validators(
-        node_id: impl Into<String>,
+        node_key_seed: impl AsRef<str>,
         chain_store: C,
         validators: Vec<String>,
-    ) -> Self {
-        let node_id = node_id.into();
+    ) -> anyhow::Result<Self> {
+        let signing_key = signing_key(node_key_seed.as_ref());
         let validators = if validators.is_empty() {
-            vec![node_id.clone()]
+            vec![validator_id(&signing_key.verifying_key())]
         } else {
             validators
         };
+        let validator_keys = validators
+            .iter()
+            .map(|validator| parse_validator_id(validator))
+            .collect::<anyhow::Result<Vec<_>>>()?;
 
-        Self {
-            node_id,
-            validators,
+        Ok(Self {
+            signing_key,
+            validator_keys,
             chain_store,
             producer_state: std::sync::Arc::new(Mutex::new(ProducerState::default())),
-        }
+        })
     }
 
     async fn produce_block(&self) -> Option<Block> {
         let mut state = self.producer_state.lock().await;
         let expected_producer = self.expected_producer(state.next_height)?;
 
-        if expected_producer != self.node_id {
+        if *expected_producer != self.signing_key.verifying_key() {
             return None;
         }
 
         let height = state.next_height;
         let parent_hash = state.parent_hash.clone();
-        let hash = block_hash(&self.node_id, height, parent_hash.as_ref());
-        let block = Block {
-            hash: hash.clone(),
+        let producer = validator_id(&self.signing_key.verifying_key());
+        let mut block = Block {
+            hash: BlockHash::zero(),
             parent_hash,
             height,
-            body: format!("simple block from {} at height {height}", self.node_id).into_bytes(),
+            producer,
+            signature: Vec::new(),
+            body: format!("simple block at height {height}").into_bytes(),
         };
+        block.signature = self
+            .signing_key
+            .sign(&block_signing_bytes(&block))
+            .to_bytes()
+            .to_vec();
+        block.hash = block_hash(&block);
 
         state.next_height += 1;
-        state.parent_hash = Some(hash);
+        state.parent_hash = Some(block.hash.clone());
         Some(block)
     }
 
@@ -121,19 +128,53 @@ where
         }
     }
 
-    fn expected_producer(&self, height: u64) -> Option<&str> {
-        let validator_count = u64::try_from(self.validators.len()).ok()?;
+    fn expected_producer(&self, height: u64) -> Option<&VerifyingKey> {
+        let validator_count = u64::try_from(self.validator_keys.len()).ok()?;
         let validator_index = usize::try_from(height % validator_count).ok()?;
-        self.validators.get(validator_index).map(String::as_str)
+        self.validator_keys.get(validator_index)
+    }
+
+    async fn validate_received_block(&self, block: &Block) -> anyhow::Result<()> {
+        validate_block(block)?;
+        anyhow::ensure!(
+            block.hash == block_hash(block),
+            "block hash does not match contents"
+        );
+        let expected_producer = self
+            .expected_producer(block.height)
+            .ok_or_else(|| anyhow::anyhow!("no configured validators"))?;
+        anyhow::ensure!(
+            block.producer == validator_id(expected_producer),
+            "block producer is not scheduled for this height"
+        );
+        let signature = Signature::from_slice(&block.signature)
+            .map_err(|_| anyhow::anyhow!("block signature has invalid length"))?;
+        expected_producer
+            .verify(&block_signing_bytes(block), &signature)
+            .map_err(|_| anyhow::anyhow!("block signature is invalid"))?;
+
+        let state = self.producer_state.lock().await;
+        anyhow::ensure!(
+            block.height == state.next_height,
+            "block does not extend the selected chain"
+        );
+        anyhow::ensure!(
+            block.parent_hash == state.parent_hash,
+            "block parent is not the selected tip"
+        );
+
+        Ok(())
     }
 }
 
-#[async_trait]
-impl<C> ConsensusPort for SimpleConsensus<C>
+impl<C> SimpleConsensus<C>
 where
     C: BlockStorePort,
 {
-    async fn handle_event(&self, event: ConsensusEvent) -> anyhow::Result<Vec<ConsensusCommand>> {
+    pub async fn handle_event(
+        &self,
+        event: ConsensusEvent,
+    ) -> anyhow::Result<Vec<ConsensusCommand>> {
         match event {
             ConsensusEvent::Tick => {
                 let Some(block) = self.produce_block().await else {
@@ -170,33 +211,79 @@ where
 
                 Ok(Vec::new())
             }
-            ConsensusEvent::BlockReceived { peer_id, block } => match validate_block(&block) {
-                Ok(()) => {
-                    self.observe_valid_block(&block).await;
-                    Ok(vec![
-                        ConsensusCommand::StoreBlock(block),
-                        ConsensusCommand::ReportGoodPeer {
-                            peer_id,
-                            reason: "valid block received".to_string(),
-                        },
-                    ])
+            ConsensusEvent::BlockReceived { peer_id, block } => {
+                match self.validate_received_block(&block).await {
+                    Ok(()) => {
+                        self.observe_valid_block(&block).await;
+                        Ok(vec![
+                            ConsensusCommand::StoreBlock(block),
+                            ConsensusCommand::ReportGoodPeer {
+                                peer_id,
+                                reason: "valid block received".to_string(),
+                            },
+                        ])
+                    }
+                    Err(error) => Ok(vec![ConsensusCommand::ReportBadPeer {
+                        peer_id,
+                        reason: format!("invalid block: {error}"),
+                    }]),
                 }
-                Err(error) => Ok(vec![ConsensusCommand::ReportBadPeer {
-                    peer_id,
-                    reason: format!("invalid block: {error}"),
-                }]),
-            },
+            }
         }
     }
 }
 
-fn block_hash(node_id: &str, height: u64, parent_hash: Option<&BlockHash>) -> BlockHash {
-    let mut hasher = Sha256::new();
-    hasher.update(node_id.as_bytes());
-    hasher.update(height.to_le_bytes());
-    if let Some(parent_hash) = parent_hash {
-        hasher.update(parent_hash.as_bytes());
+pub fn validator_id_from_seed(seed: &str) -> String {
+    validator_id(&signing_key(seed).verifying_key())
+}
+
+fn signing_key(seed: &str) -> SigningKey {
+    let bytes: [u8; 32] = Sha256::digest(seed.as_bytes()).into();
+    SigningKey::from_bytes(&bytes)
+}
+
+fn validator_id(key: &VerifyingKey) -> String {
+    key.as_bytes()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
+fn parse_validator_id(value: &str) -> anyhow::Result<VerifyingKey> {
+    anyhow::ensure!(
+        value.len() == 64,
+        "validator id must be a 32-byte public key encoded as hex"
+    );
+    let mut bytes = [0; 32];
+    for (index, byte) in bytes.iter_mut().enumerate() {
+        *byte = u8::from_str_radix(&value[index * 2..index * 2 + 2], 16)
+            .map_err(|_| anyhow::anyhow!("validator id must be hexadecimal"))?;
     }
+    VerifyingKey::from_bytes(&bytes)
+        .map_err(|_| anyhow::anyhow!("validator id is not a valid Ed25519 public key"))
+}
+
+fn block_signing_bytes(block: &Block) -> Vec<u8> {
+    let mut bytes = Vec::new();
+    bytes.extend_from_slice(&block.height.to_le_bytes());
+    match &block.parent_hash {
+        Some(parent_hash) => {
+            bytes.push(1);
+            bytes.extend_from_slice(parent_hash.as_bytes());
+        }
+        None => bytes.push(0),
+    }
+    bytes.extend_from_slice(&(block.producer.len() as u64).to_le_bytes());
+    bytes.extend_from_slice(block.producer.as_bytes());
+    bytes.extend_from_slice(&(block.body.len() as u64).to_le_bytes());
+    bytes.extend_from_slice(&block.body);
+    bytes
+}
+
+fn block_hash(block: &Block) -> BlockHash {
+    let mut hasher = Sha256::new();
+    hasher.update(block_signing_bytes(block));
+    hasher.update(&block.signature);
 
     let digest = hasher.finalize();
     let mut bytes = [0; 32];
@@ -208,6 +295,21 @@ fn block_hash(node_id: &str, height: u64, parent_hash: Option<&BlockHash>) -> Bl
 mod tests {
     use super::*;
     use p2p_chain_lib_chain::store::ChainStore;
+
+    fn signed_block(seed: &str, parent_hash: Option<BlockHash>, height: u64) -> Block {
+        let key = signing_key(seed);
+        let mut block = Block {
+            hash: BlockHash::zero(),
+            parent_hash,
+            height,
+            producer: validator_id(&key.verifying_key()),
+            signature: Vec::new(),
+            body: format!("block {height}").into_bytes(),
+        };
+        block.signature = key.sign(&block_signing_bytes(&block)).to_bytes().to_vec();
+        block.hash = block_hash(&block);
+        block
+    }
 
     #[tokio::test]
     async fn tick_produces_store_and_broadcast_commands() -> anyhow::Result<()> {
@@ -226,8 +328,11 @@ mod tests {
         let consensus = SimpleConsensus::with_validators(
             "node-b",
             ChainStore::new(),
-            vec!["node-a".to_string(), "node-b".to_string()],
-        );
+            vec![
+                validator_id_from_seed("node-a"),
+                validator_id_from_seed("node-b"),
+            ],
+        )?;
         let commands = consensus.handle_event(ConsensusEvent::Tick).await?;
 
         assert!(commands.is_empty());
@@ -239,14 +344,12 @@ mod tests {
         let consensus = SimpleConsensus::with_validators(
             "node-b",
             ChainStore::new(),
-            vec!["node-a".to_string(), "node-b".to_string()],
-        );
-        let parent = Block {
-            hash: BlockHash::from_u8(1),
-            parent_hash: None,
-            height: 0,
-            body: b"node-a block".to_vec(),
-        };
+            vec![
+                validator_id_from_seed("node-a"),
+                validator_id_from_seed("node-b"),
+            ],
+        )?;
+        let parent = signed_block("node-a", None, 0);
 
         consensus
             .handle_event(ConsensusEvent::BlockReceived {
@@ -260,6 +363,57 @@ mod tests {
             ConsensusCommand::StoreBlock(block_a),
             ConsensusCommand::BroadcastBlock(block_b),
         ] if block_a == block_b && block_a.height == 1 && block_a.parent_hash == Some(parent.hash)));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn rejects_block_with_unknown_parent() -> anyhow::Result<()> {
+        let consensus = SimpleConsensus::new("node-a", ChainStore::new());
+        let block = signed_block("node-a", Some(BlockHash::from_u8(1)), 1);
+
+        let commands = consensus
+            .handle_event(ConsensusEvent::BlockReceived {
+                peer_id: PeerId::from("peer-a"),
+                block,
+            })
+            .await?;
+
+        assert!(matches!(
+            commands.as_slice(),
+            [ConsensusCommand::ReportBadPeer { .. }]
+        ));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn rejects_tampered_hash_wrong_producer_and_invalid_signature() -> anyhow::Result<()> {
+        let consensus = SimpleConsensus::with_validators(
+            "node-a",
+            ChainStore::new(),
+            vec![validator_id_from_seed("node-a")],
+        )?;
+
+        let mut wrong_hash = signed_block("node-a", None, 0);
+        wrong_hash.hash = BlockHash::from_u8(9);
+        let mut wrong_producer = signed_block("node-b", None, 0);
+        wrong_producer.producer = validator_id_from_seed("node-a");
+        wrong_producer.hash = block_hash(&wrong_producer);
+        let mut invalid_signature = signed_block("node-a", None, 0);
+        invalid_signature.signature[0] ^= 1;
+        invalid_signature.hash = block_hash(&invalid_signature);
+
+        for block in [wrong_hash, wrong_producer, invalid_signature] {
+            let commands = consensus
+                .handle_event(ConsensusEvent::BlockReceived {
+                    peer_id: PeerId::from("peer-a"),
+                    block,
+                })
+                .await?;
+            assert!(matches!(
+                commands.as_slice(),
+                [ConsensusCommand::ReportBadPeer { .. }]
+            ));
+        }
         Ok(())
     }
 

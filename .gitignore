@@ -9,6 +9,7 @@
 *.log
 *.out
 *.err
+/test-ledger/
 
 # Markdown docs
 *.md

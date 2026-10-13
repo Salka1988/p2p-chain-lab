@@ -4,6 +4,5 @@ version.workspace = true
 edition.workspace = true
 
 [dependencies]
-async-trait.workspace = true
 p2p-chain-lib-protocol = { path = "../protocol" }
 tokio.workspace = true

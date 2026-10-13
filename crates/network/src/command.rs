@@ -11,7 +11,8 @@ pub(crate) enum NetworkCommand {
     },
     SendBlock {
         peer_id: PeerId,
-        block: Block,
+        block_hash: BlockHash,
+        block: Option<Block>,
     },
     BroadcastBlock(Block),
 }

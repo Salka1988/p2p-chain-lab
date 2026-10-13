@@ -72,8 +72,19 @@ impl PeerScoreHandle {
     }
 
     async fn send(&self, command: PeerScoreCommand) -> anyhow::Result<()> {
-        self.command_tx.send(command).await?;
-        Ok(())
+        match self.command_tx.try_send(command) {
+            Ok(()) => Ok(()),
+            Err(mpsc::error::TrySendError::Full(command)) => {
+                tracing::warn!(
+                    ?command,
+                    "dropping peer score command because queue is full"
+                );
+                Ok(())
+            }
+            Err(mpsc::error::TrySendError::Closed(_)) => {
+                anyhow::bail!("peer score receiver closed")
+            }
+        }
     }
 }
 
@@ -222,6 +233,22 @@ mod tests {
 
         cancellation_token.cancel();
         actor_task.await??;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn drops_commands_when_queue_is_full() -> anyhow::Result<()> {
+        let (command_tx, mut command_rx) = mpsc::channel(1);
+        let handle = PeerScoreHandle::new(command_tx);
+
+        handle.connected(PeerId::from("peer-a")).await?;
+        handle.connected(PeerId::from("peer-b")).await?;
+
+        assert_eq!(
+            command_rx.recv().await,
+            Some(PeerScoreCommand::PeerConnected(PeerId::from("peer-a")))
+        );
+        assert!(command_rx.try_recv().is_err());
         Ok(())
     }
 }
