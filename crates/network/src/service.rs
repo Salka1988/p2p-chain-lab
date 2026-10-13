@@ -266,6 +266,14 @@ fn event_peer_id(event: &NetworkEvent) -> Option<&PeerId> {
     }
 }
 
+fn block_response_matches_request(expected_hash: &BlockHash, response: &BlockResponse) -> bool {
+    response.block_hash == *expected_hash
+        && response
+            .block
+            .as_ref()
+            .is_none_or(|block| block.hash == *expected_hash)
+}
+
 impl NetworkService {
     pub fn new(
         config: NetworkConfig,
@@ -981,31 +989,16 @@ impl NetworkService {
         validator_id: &str,
         value: Vec<u8>,
     ) -> anyhow::Result<()> {
-        let record = crate::validator_directory::decode_record(&value)
-            .with_context(|| format!("invalid validator record for {validator_id}"))?;
-        anyhow::ensure!(
-            record.validator_id == validator_id,
-            "validator record identity does not match its lookup key"
-        );
-        crate::validator_directory::verify_record(&record)
-            .with_context(|| format!("invalid validator record signature for {validator_id}"))?;
-
-        let peer_id: libp2p::PeerId = record
-            .peer_id
-            .parse()
-            .with_context(|| format!("invalid peer id in validator record for {validator_id}"))?;
+        let (peer_id, addresses) = Self::parse_validator_record_lookup(validator_id, &value)?;
 
         tracing::info!(
             validator_id = %validator_id,
             peer_id = %peer_id,
-            address_count = record.listen_addrs.len(),
+            address_count = addresses.len(),
             "validator record received"
         );
 
-        for address in record.listen_addrs {
-            let address: Multiaddr = address
-                .parse()
-                .with_context(|| format!("invalid validator address for {validator_id}"))?;
+        for address in addresses {
             swarm.add_peer_address(peer_id, address.clone());
             swarm
                 .behaviour_mut()
@@ -1025,6 +1018,36 @@ impl NetworkService {
         }
 
         Ok(())
+    }
+
+    fn parse_validator_record_lookup(
+        validator_id: &str,
+        value: &[u8],
+    ) -> anyhow::Result<(libp2p::PeerId, Vec<Multiaddr>)> {
+        let record = crate::validator_directory::decode_record(value)
+            .with_context(|| format!("invalid validator record for {validator_id}"))?;
+        anyhow::ensure!(
+            record.validator_id == validator_id,
+            "validator record identity does not match its lookup key"
+        );
+        crate::validator_directory::verify_record(&record)
+            .with_context(|| format!("invalid validator record signature for {validator_id}"))?;
+
+        let peer_id: libp2p::PeerId = record
+            .peer_id
+            .parse()
+            .with_context(|| format!("invalid peer id in validator record for {validator_id}"))?;
+        let addresses = record
+            .listen_addrs
+            .into_iter()
+            .map(|address| {
+                address
+                    .parse()
+                    .with_context(|| format!("invalid validator address for {validator_id}"))
+            })
+            .collect::<anyhow::Result<Vec<_>>>()?;
+
+        Ok((peer_id, addresses))
     }
 
     fn remote_validator_ids(&self) -> impl Iterator<Item = String> + '_ {
@@ -1191,14 +1214,36 @@ impl NetworkService {
                     request_id,
                     response,
                 } => {
-                    pending_block_requests.outbound.remove(&request_id);
+                    let Some(expected_hash) = pending_block_requests.outbound.remove(&request_id)
+                    else {
+                        tracing::warn!(peer_id = %peer, ?request_id, "received response for an unknown block request");
+                        return Ok(());
+                    };
+                    if !block_response_matches_request(&expected_hash, &response) {
+                        self.peer_score
+                            .bad_message(
+                                PeerId::from(peer.to_string()),
+                                "block response does not match its request",
+                            )
+                            .await?;
+                        self.emit_event(
+                            swarm,
+                            None,
+                            NetworkEvent::BlockRequestFailed {
+                                peer_id: PeerId::from(peer.to_string()),
+                                block_hash: expected_hash,
+                            },
+                        )
+                        .await?;
+                        return Ok(());
+                    }
                     let Some(block) = response.block else {
                         self.emit_event(
                             swarm,
                             None,
                             NetworkEvent::BlockNotFound {
                                 peer_id: PeerId::from(peer.to_string()),
-                                block_hash: response.block_hash,
+                                block_hash: expected_hash,
                             },
                         )
                         .await?;
@@ -1316,6 +1361,22 @@ mod tests {
         assert_eq!(first, second);
         assert_ne!(first, third);
         Ok(())
+    }
+
+    #[test]
+    fn malformed_validator_record_is_rejected_without_panicking() {
+        assert!(NetworkService::parse_validator_record_lookup("validator-a", b"not cbor").is_err());
+    }
+
+    #[test]
+    fn rejects_block_response_for_a_different_hash() {
+        let expected_hash = BlockHash::from_u8(1);
+        let response = BlockResponse {
+            block_hash: BlockHash::from_u8(2),
+            block: None,
+        };
+
+        assert!(!block_response_matches_request(&expected_hash, &response));
     }
 
     #[test]

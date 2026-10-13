@@ -7,17 +7,20 @@ services:
       - /ip4/0.0.0.0/tcp/4001
       - --node-key-seed
       - bootstrap
-      - --validator=bootstrap
-      - --validator=node-a
-      - --validator=node-b
-      - --validator=node-c
-      - --validator=node-d
+      - --validator=8dbb6e3a8c26a5e5411ebda12f317cd4adbbc0fc3bca0d8e0c9ebab9b59e4b49
+      - --validator=3e7d04d3813a4c90546bf2dec79da711152dbdc5f927f152485c6555887f2dde
+      - --validator=86f14770b6f56d58727d65f274104d73ecf947c2e0ed1330d09818fad8b8fa05
+      - --validator=cbe88a618ffb438746d3739c790264ae47fb4d6a3383d4e464459ae336dfdb11
+      - --validator=a3a4051633a000555919f0fa0686c1cc1a4ad18e24e388f2abcfd8bc3a656d78
+      - --chain-path=/data/chain.bin
       - --produce-block-interval-ms
       - "5000"
     ports:
       - "4001:4001"
     environment:
       RUST_LOG: info
+    volumes:
+      - bootstrap-data:/data
 
   node-a:
     build: .
@@ -27,11 +30,12 @@ services:
       - /ip4/0.0.0.0/tcp/4001
       - --node-key-seed
       - node-a
-      - --validator=bootstrap
-      - --validator=node-a
-      - --validator=node-b
-      - --validator=node-c
-      - --validator=node-d
+      - --validator=8dbb6e3a8c26a5e5411ebda12f317cd4adbbc0fc3bca0d8e0c9ebab9b59e4b49
+      - --validator=3e7d04d3813a4c90546bf2dec79da711152dbdc5f927f152485c6555887f2dde
+      - --validator=86f14770b6f56d58727d65f274104d73ecf947c2e0ed1330d09818fad8b8fa05
+      - --validator=cbe88a618ffb438746d3739c790264ae47fb4d6a3383d4e464459ae336dfdb11
+      - --validator=a3a4051633a000555919f0fa0686c1cc1a4ad18e24e388f2abcfd8bc3a656d78
+      - --chain-path=/data/chain.bin
       - --produce-block-interval-ms
       - "5000"
       - --bootstrap
@@ -46,6 +50,8 @@ services:
       - bootstrap
     environment:
       RUST_LOG: info
+    volumes:
+      - node-a-data:/data
 
   node-b:
     build: .
@@ -55,11 +61,12 @@ services:
       - /ip4/0.0.0.0/tcp/4001
       - --node-key-seed
       - node-b
-      - --validator=bootstrap
-      - --validator=node-a
-      - --validator=node-b
-      - --validator=node-c
-      - --validator=node-d
+      - --validator=8dbb6e3a8c26a5e5411ebda12f317cd4adbbc0fc3bca0d8e0c9ebab9b59e4b49
+      - --validator=3e7d04d3813a4c90546bf2dec79da711152dbdc5f927f152485c6555887f2dde
+      - --validator=86f14770b6f56d58727d65f274104d73ecf947c2e0ed1330d09818fad8b8fa05
+      - --validator=cbe88a618ffb438746d3739c790264ae47fb4d6a3383d4e464459ae336dfdb11
+      - --validator=a3a4051633a000555919f0fa0686c1cc1a4ad18e24e388f2abcfd8bc3a656d78
+      - --chain-path=/data/chain.bin
       - --produce-block-interval-ms
       - "5000"
       - --bootstrap
@@ -74,6 +81,8 @@ services:
       - bootstrap
     environment:
       RUST_LOG: info
+    volumes:
+      - node-b-data:/data
 
   node-c:
     build: .
@@ -83,11 +92,12 @@ services:
       - /ip4/0.0.0.0/tcp/4001
       - --node-key-seed
       - node-c
-      - --validator=bootstrap
-      - --validator=node-a
-      - --validator=node-b
-      - --validator=node-c
-      - --validator=node-d
+      - --validator=8dbb6e3a8c26a5e5411ebda12f317cd4adbbc0fc3bca0d8e0c9ebab9b59e4b49
+      - --validator=3e7d04d3813a4c90546bf2dec79da711152dbdc5f927f152485c6555887f2dde
+      - --validator=86f14770b6f56d58727d65f274104d73ecf947c2e0ed1330d09818fad8b8fa05
+      - --validator=cbe88a618ffb438746d3739c790264ae47fb4d6a3383d4e464459ae336dfdb11
+      - --validator=a3a4051633a000555919f0fa0686c1cc1a4ad18e24e388f2abcfd8bc3a656d78
+      - --chain-path=/data/chain.bin
       - --produce-block-interval-ms
       - "5000"
       - --bootstrap
@@ -102,6 +112,8 @@ services:
       - bootstrap
     environment:
       RUST_LOG: info
+    volumes:
+      - node-c-data:/data
 
   node-d:
     build: .
@@ -111,11 +123,12 @@ services:
       - /ip4/0.0.0.0/tcp/4001
       - --node-key-seed
       - node-d
-      - --validator=bootstrap
-      - --validator=node-a
-      - --validator=node-b
-      - --validator=node-c
-      - --validator=node-d
+      - --validator=8dbb6e3a8c26a5e5411ebda12f317cd4adbbc0fc3bca0d8e0c9ebab9b59e4b49
+      - --validator=3e7d04d3813a4c90546bf2dec79da711152dbdc5f927f152485c6555887f2dde
+      - --validator=86f14770b6f56d58727d65f274104d73ecf947c2e0ed1330d09818fad8b8fa05
+      - --validator=cbe88a618ffb438746d3739c790264ae47fb4d6a3383d4e464459ae336dfdb11
+      - --validator=a3a4051633a000555919f0fa0686c1cc1a4ad18e24e388f2abcfd8bc3a656d78
+      - --chain-path=/data/chain.bin
       - --produce-block-interval-ms
       - "5000"
       - --bootstrap
@@ -130,3 +143,12 @@ services:
       - bootstrap
     environment:
       RUST_LOG: info
+    volumes:
+      - node-d-data:/data
+
+volumes:
+  bootstrap-data:
+  node-a-data:
+  node-b-data:
+  node-c-data:
+  node-d-data:

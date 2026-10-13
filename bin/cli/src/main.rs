@@ -40,7 +40,7 @@ async fn main() -> anyhow::Result<()> {
     let (peer_score_event_tx, peer_score_event_rx) = tokio::sync::mpsc::channel(1024);
 
     let peer_score = PeerScoreHandle::new(peer_score_command_tx);
-    let chain_store = ChainStore::new();
+    let chain_store = ChainStore::open(&config.chain_path)?;
     let mempool = Mempool::new();
 
     let (network_service, network) = NetworkService::new(

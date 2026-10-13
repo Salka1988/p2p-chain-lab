@@ -1,4 +1,4 @@
-use std::time::Duration;
+use std::{path::PathBuf, time::Duration};
 
 use p2p_chain_lib_ports::PeerAddress;
 
@@ -9,6 +9,7 @@ pub struct Config {
     pub listen_addr: PeerAddress,
     pub bootstrap_peers: Vec<PeerAddress>,
     pub node_key_seed: Option<String>,
+    pub chain_path: PathBuf,
     pub block_production_interval: Option<Duration>,
     pub validators: Vec<String>,
     pub max_gossip_events_per_second: u16,
@@ -21,6 +22,7 @@ impl Default for Config {
             listen_addr: PeerAddress::from(DEFAULT_LISTEN_ADDR),
             bootstrap_peers: Vec::new(),
             node_key_seed: None,
+            chain_path: PathBuf::from("chain.bin"),
             block_production_interval: None,
             validators: Vec::new(),
             max_gossip_events_per_second: 64,

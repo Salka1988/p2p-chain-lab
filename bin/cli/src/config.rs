@@ -8,6 +8,7 @@ use p2p_chain_lib_node::config::Config;
 use p2p_chain_lib_ports::PeerAddress;
 
 const DEFAULT_LISTEN_ADDR: &str = "/ip4/127.0.0.1/tcp/0";
+const DEFAULT_CHAIN_PATH: &str = "chain.bin";
 
 #[derive(Debug, Parser)]
 #[command(
@@ -24,6 +25,9 @@ struct Cli {
 
     #[arg(long, value_parser = NonEmptyStringValueParser::new())]
     node_key_seed: Option<String>,
+
+    #[arg(long, default_value = DEFAULT_CHAIN_PATH, value_parser = NonEmptyStringValueParser::new())]
+    chain_path: String,
 
     #[arg(
         long,
@@ -53,6 +57,7 @@ impl From<Cli> for Config {
             listen_addr: PeerAddress::from(cli.listen),
             bootstrap_peers: cli.bootstrap.into_iter().map(PeerAddress::from).collect(),
             node_key_seed: cli.node_key_seed,
+            chain_path: cli.chain_path.into(),
             block_production_interval: cli.produce_block_interval_ms.map(Duration::from_millis),
             validators: cli.validator,
             max_gossip_events_per_second: cli.max_gossip_events_per_second,
@@ -73,6 +78,7 @@ mod tests {
             "--bootstrap=/ip4/127.0.0.1/tcp/4002",
             "--bootstrap=/ip4/127.0.0.1/tcp/4003",
             "--node-key-seed=node-a",
+            "--chain-path=/tmp/chain.bin",
             "--validator=node-a",
             "--validator=node-b",
             "--produce-block-interval-ms=250",
@@ -91,6 +97,10 @@ mod tests {
             vec!["/ip4/127.0.0.1/tcp/4002", "/ip4/127.0.0.1/tcp/4003"]
         );
         assert_eq!(config.node_key_seed.as_deref(), Some("node-a"));
+        assert_eq!(
+            config.chain_path,
+            std::path::PathBuf::from("/tmp/chain.bin")
+        );
         assert_eq!(config.validators, vec!["node-a", "node-b"]);
         assert_eq!(
             config.block_production_interval,

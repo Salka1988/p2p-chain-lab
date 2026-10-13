@@ -254,6 +254,57 @@ async fn disconnects_peer_that_exceeds_block_request_limit() -> anyhow::Result<(
 }
 
 #[tokio::test]
+async fn rejects_a_rate_limited_peer_after_it_reconnects() -> anyhow::Result<()> {
+    let first_seed = "reconnect-rate-limit-node-a";
+    let second_seed = "reconnect-rate-limit-node-b";
+    let mut first = TestNetwork::start_with_limits(first_seed, Vec::new(), 64, 1).await?;
+    let first_addr = first.listening_addr().await?;
+    let first_bootstrap_addr = with_peer_id(first_addr, deterministic_peer_id(first_seed)?)?;
+    let mut second = TestNetwork::start(second_seed, vec![first_bootstrap_addr.clone()]).await?;
+
+    let first_peer_id = second
+        .wait_for_event(|event| match event {
+            NetworkEvent::PeerConnected(peer_id) => Some(peer_id),
+            _ => None,
+        })
+        .await?;
+    let second_peer_id = first
+        .wait_for_event(|event| match event {
+            NetworkEvent::PeerConnected(peer_id) => Some(peer_id),
+            _ => None,
+        })
+        .await?;
+
+    second
+        .handle
+        .request_block(first_peer_id.clone(), BlockHash::from_u8(1))
+        .await?;
+    second
+        .handle
+        .request_block(first_peer_id, BlockHash::from_u8(2))
+        .await?;
+    first
+        .wait_for_event(|event| match event {
+            NetworkEvent::PeerDisconnected(peer_id) if peer_id == second_peer_id => Some(()),
+            _ => None,
+        })
+        .await?;
+    second.stop().await?;
+
+    let replacement = TestNetwork::start(second_seed, vec![first_bootstrap_addr]).await?;
+    first
+        .wait_for_event(|event| match event {
+            NetworkEvent::PeerDisconnected(peer_id) if peer_id == second_peer_id => Some(()),
+            _ => None,
+        })
+        .await?;
+
+    replacement.stop().await?;
+    first.stop().await?;
+    Ok(())
+}
+
+#[tokio::test]
 async fn transaction_broadcast_reaches_connected_peer() -> anyhow::Result<()> {
     let (first, mut second, _) = connected_pair().await?;
     let expected = tx(7);

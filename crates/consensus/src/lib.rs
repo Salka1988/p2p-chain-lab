@@ -54,6 +54,7 @@ pub struct SimpleConsensus<C> {
 struct ProducerState {
     next_height: u64,
     parent_hash: Option<BlockHash>,
+    initialized: bool,
 }
 
 impl<C> SimpleConsensus<C>
@@ -90,6 +91,7 @@ where
     }
 
     async fn produce_block(&self) -> Option<Block> {
+        self.initialize_state().await;
         let mut state = self.producer_state.lock().await;
         let expected_producer = self.expected_producer(state.next_height)?;
 
@@ -135,6 +137,7 @@ where
     }
 
     async fn validate_received_block(&self, block: &Block) -> anyhow::Result<()> {
+        self.initialize_state().await;
         validate_block(block)?;
         anyhow::ensure!(
             block.hash == block_hash(block),
@@ -164,6 +167,19 @@ where
         );
 
         Ok(())
+    }
+
+    async fn initialize_state(&self) {
+        let tip = self.chain_store.selected_tip().await;
+        let mut state = self.producer_state.lock().await;
+        if state.initialized {
+            return;
+        }
+        if let Some(tip) = tip {
+            state.next_height = tip.height + 1;
+            state.parent_hash = Some(tip.hash);
+        }
+        state.initialized = true;
     }
 }
 
@@ -336,6 +352,20 @@ mod tests {
         let commands = consensus.handle_event(ConsensusEvent::Tick).await?;
 
         assert!(commands.is_empty());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn resumes_production_after_the_persisted_tip() -> anyhow::Result<()> {
+        let store = ChainStore::new();
+        store.insert(signed_block("node-a", None, 0)).await?;
+        let consensus = SimpleConsensus::new("node-a", store);
+
+        let commands = consensus.handle_event(ConsensusEvent::Tick).await?;
+
+        assert!(
+            matches!(commands.as_slice(), [ConsensusCommand::StoreBlock(block), ..] if block.height == 1)
+        );
         Ok(())
     }
 

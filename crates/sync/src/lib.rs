@@ -252,7 +252,7 @@ mod tests {
     async fn skips_known_announced_block() -> anyhow::Result<()> {
         let (request_tx, mut request_rx) = mpsc::channel(4);
         let store = ChainStore::new();
-        store.insert(block(1)).await;
+        store.insert(block(1)).await?;
         let sync = SyncService::new(
             RecordingNetwork { request_tx },
             store,
@@ -307,6 +307,27 @@ mod tests {
 
     #[tokio::test]
     async fn retries_after_request_failure() -> anyhow::Result<()> {
+        let (request_tx, mut request_rx) = mpsc::channel(4);
+        let sync = SyncService::new(
+            RecordingNetwork { request_tx },
+            ChainStore::new(),
+            RecordingReputation::default(),
+        );
+        let hash = BlockHash::from_u8(1);
+
+        sync.on_block_announcement(PeerId::from("peer-a"), announcement(1))
+            .await?;
+        sync.on_block_request_failed(&hash).await?;
+        sync.on_block_announcement(PeerId::from("peer-b"), announcement(1))
+            .await?;
+
+        assert!(request_rx.recv().await.is_some());
+        assert!(request_rx.recv().await.is_some());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn retries_after_rejected_block_response() -> anyhow::Result<()> {
         let (request_tx, mut request_rx) = mpsc::channel(4);
         let sync = SyncService::new(
             RecordingNetwork { request_tx },

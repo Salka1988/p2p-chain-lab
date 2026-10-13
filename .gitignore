@@ -10,6 +10,7 @@
 *.out
 *.err
 /test-ledger/
+/chain.bin
 
 # Markdown docs
 *.md

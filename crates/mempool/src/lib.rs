@@ -1,4 +1,7 @@
-use std::{collections::HashMap, sync::Arc};
+use std::{
+    collections::{HashMap, VecDeque},
+    sync::Arc,
+};
 
 use p2p_chain_lib_protocol::messages::{Transaction, TransactionId};
 use tokio::sync::Mutex;
@@ -15,6 +18,7 @@ pub struct Mempool {
 #[derive(Debug, Default)]
 struct MempoolState {
     transactions: HashMap<TransactionId, Transaction>,
+    insertion_order: VecDeque<TransactionId>,
     total_bytes: usize,
 }
 
@@ -30,14 +34,23 @@ impl Mempool {
         }
 
         let mut state = self.state.lock().await;
-        if state.transactions.contains_key(&tx.id)
-            || state.transactions.len() >= MAX_TRANSACTIONS
-            || state.total_bytes.saturating_add(tx_bytes) > MAX_TOTAL_BYTES
-        {
+        if state.transactions.contains_key(&tx.id) {
             return false;
         }
 
+        while state.transactions.len() >= MAX_TRANSACTIONS
+            || state.total_bytes.saturating_add(tx_bytes) > MAX_TOTAL_BYTES
+        {
+            let Some(oldest_id) = state.insertion_order.pop_front() else {
+                break;
+            };
+            if let Some(oldest) = state.transactions.remove(&oldest_id) {
+                state.total_bytes -= oldest.payload.len();
+            }
+        }
+
         state.total_bytes += tx_bytes;
+        state.insertion_order.push_back(tx.id.clone());
         state.transactions.insert(tx.id.clone(), tx);
         true
     }
@@ -89,5 +102,28 @@ mod tests {
                 .await
         );
         assert!(mempool.is_empty().await);
+    }
+
+    #[tokio::test]
+    async fn evicts_oldest_transactions_when_byte_limit_is_reached() {
+        let mempool = Mempool::new();
+        let payload = vec![0; MAX_TRANSACTION_BYTES];
+        let first_id = TransactionId::from_bytes([0; 32]);
+
+        for index in 0..=MAX_TOTAL_BYTES / MAX_TRANSACTION_BYTES {
+            let mut bytes = [0; 32];
+            bytes[..8].copy_from_slice(&(index as u64).to_le_bytes());
+            assert!(
+                mempool
+                    .insert(Transaction {
+                        id: TransactionId::from_bytes(bytes),
+                        payload: payload.clone(),
+                    })
+                    .await
+            );
+        }
+
+        assert_eq!(mempool.len().await, MAX_TOTAL_BYTES / MAX_TRANSACTION_BYTES);
+        assert!(!mempool.contains(&first_id).await);
     }
 }

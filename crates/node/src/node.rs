@@ -164,6 +164,9 @@ impl Node {
                                     }
                                     Ok(false) => {
                                         tracing::debug!("received block was not accepted by consensus");
+                                        if let Err(error) = runtime.sync.on_block_request_failed(&block_hash).await {
+                                            tracing::warn!(?error, "failed to clear rejected block sync request");
+                                        }
                                     }
                                     Err(error) => {
                                         tracing::warn!(?error, "failed to handle received block through consensus");
@@ -235,7 +238,7 @@ impl Node {
         for command in consensus.handle_event(event).await? {
             match command {
                 ConsensusCommand::StoreBlock(block) => {
-                    let inserted = chain_store.insert(block).await;
+                    let inserted = chain_store.insert(block).await?;
                     stored_block = true;
                     tracing::debug!(inserted, "consensus block store insert finished");
                 }
