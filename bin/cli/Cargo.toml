@@ -6,6 +6,8 @@ edition = "2024"
 [dependencies]
 anyhow.workspace = true
 clap.workspace = true
+config.workspace = true
+serde.workspace = true
 p2p-chain-lib-chain = { path = "../../crates/chain" }
 p2p-chain-lib-consensus = { path = "../../crates/consensus" }
 p2p-chain-lib-mempool = { path = "../../crates/mempool" }
@@ -17,3 +19,6 @@ tokio.workspace = true
 tokio-util.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
+
+[dev-dependencies]
+tempfile = "3"
