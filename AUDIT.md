@@ -153,29 +153,35 @@ the distinction behind the earlier sync bug.
 
 #### 5. Domain and infrastructure responsibilities still overlap
 
-Status: storage separation fixed in the working tree. The chain crate retains
+Status: fixed. The chain crate retains
 Block, BlockHash, and BlockStorePort. The new storage adapter crate owns
 ChainStore, its memory cache, filesystem I/O, snapshot serialization, and storage
 tests. The domain no longer depends on Tokio or bincode. Consensus and sync use
 the storage adapter only as a dev-dependency for tests.
 
-The CLI constructs the storage adapter; NodeRuntime remains non-generic and
-still names concrete adapters as runtime wiring. Turning the node crate into a
-fully transport/storage-independent application layer remains a separate part
-of this finding, not something this extraction claims to resolve.
+The CLI constructs the adapters and supplies shared trait-object handles for
+BlockStorePort, BlockNetworkPort, and PeerReputationPort. NodeRuntime remains
+non-generic; SimpleConsensus and SyncService remain concrete application services.
+The node's production dependencies no longer include network or storage adapters
+(they are dev-dependencies only). BlockRequestPort remains the narrower sync
+transport contract. Ports no longer require Clone; shared Arc handles provide
+cloning without tying the contracts to concrete adapters.
 
 Persistence format and write-before-memory ordering are unchanged. Existing
 reopen, failed-write/retry, and genesis-mismatch tests exercise the moved adapter.
 
 Verification: workspace library/binary tests, workspace Clippy with warnings
-denied, formatting, and the six-node late-join test passed (22.59s).
+denied, formatting, all nine network integration tests, and the six-node late-join
+test passed. A recording transport test
+checks known-block and not-found responses through the node's network port;
+the reverse-history test checks every recovered block through the storage port.
 
 Sources: [storage adapter](crates/storage/src/lib.rs),
 [storage port](crates/chain/src/store.rs),
 [node dependencies](crates/node/src/node.rs).
 
-Chain storage combines a port, memory storage, filesystem operations, and
-serialization. Node names concrete network and storage adapters.
+Original finding: chain storage combined a port, memory storage, filesystem
+operations, and serialization. Node named concrete network and storage adapters.
 
 Fix: move filesystem persistence into a storage adapter. If node is intended as
 the inner application layer, give its external I/O dependencies narrow contracts.

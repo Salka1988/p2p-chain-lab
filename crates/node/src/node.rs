@@ -1,13 +1,13 @@
-use std::time::Duration;
+use std::{sync::Arc, time::Duration};
+
+use p2p_chain_lib_chain::store::BlockStorePort;
 
 use p2p_chain_lib_consensus::{
     ConsensusCommand, ConsensusEvent, ConsensusOutcome, SimpleConsensus,
 };
 use p2p_chain_lib_mempool::Mempool;
-use p2p_chain_lib_network::{peer_score::PeerScoreHandle, service::NetworkHandle};
-use p2p_chain_lib_ports::{NetworkEvent, PeerReputationPort};
+use p2p_chain_lib_ports::{BlockNetworkPort, BlockRequestPort, NetworkEvent, PeerReputationPort};
 use p2p_chain_lib_protocol::{messages::ChainTip, validation::validate_transaction};
-use p2p_chain_lib_storage::ChainStore;
 use p2p_chain_lib_sync::SyncService;
 use tokio::{sync::mpsc, task::JoinSet};
 use tokio_util::sync::CancellationToken;
@@ -17,12 +17,16 @@ pub struct Node {
 }
 
 pub struct NodeRuntime {
-    pub network: NetworkHandle,
-    pub chain_store: ChainStore,
+    pub network: Arc<dyn BlockNetworkPort>,
+    pub chain_store: Arc<dyn BlockStorePort>,
     pub mempool: Mempool,
-    pub consensus: SimpleConsensus<ChainStore>,
-    pub sync: SyncService<NetworkHandle, ChainStore, PeerScoreHandle>,
-    pub peer_reputation: PeerScoreHandle,
+    pub consensus: SimpleConsensus<Arc<dyn BlockStorePort>>,
+    pub sync: SyncService<
+        Arc<dyn BlockNetworkPort>,
+        Arc<dyn BlockStorePort>,
+        Arc<dyn PeerReputationPort>,
+    >,
+    pub peer_reputation: Arc<dyn PeerReputationPort>,
     pub network_event_rx: mpsc::Receiver<NetworkEvent>,
     pub block_production_interval: Option<Duration>,
 }
@@ -35,7 +39,7 @@ impl Node {
     }
 
     pub async fn run(self, cancellation_token: CancellationToken) -> anyhow::Result<()> {
-        tracing::info!(listen_addr = %self.runtime.network.listen_addr(), "node running");
+        tracing::info!("node running");
         let result = tokio::select! {
             biased;
             _ = cancellation_token.cancelled() => {
@@ -87,7 +91,7 @@ impl Node {
                     }
                 }
                 _ = chain_tip_ticker.tick() => {
-                    if let Some(tip) = runtime.chain_store.tip().await
+                    if let Some(tip) = runtime.chain_store.selected_tip().await
                         && let Err(error) = runtime.network.broadcast_chain_tip(ChainTip {
                             block_hash: tip.hash,
                             height: tip.height,
@@ -218,7 +222,7 @@ impl Node {
                         }
                         NetworkEvent::BlockRequestReceived { peer_id, block_hash } => {
                             tracing::info!(%peer_id, block_hash = %block_hash, "block request received");
-                            match runtime.chain_store.get(&block_hash).await {
+                            match runtime.chain_store.get_block(&block_hash).await {
                                 Some(block) => {
                                     if let Err(error) = runtime.network.send_block(peer_id, block).await {
                                         tracing::warn!(?error, "failed to send requested block");
@@ -251,10 +255,10 @@ impl Node {
     }
 
     async fn handle_consensus_event(
-        chain_store: &ChainStore,
-        network: &NetworkHandle,
-        peer_reputation: &PeerScoreHandle,
-        consensus: &SimpleConsensus<ChainStore>,
+        chain_store: &Arc<dyn BlockStorePort>,
+        network: &Arc<dyn BlockNetworkPort>,
+        peer_reputation: &Arc<dyn PeerReputationPort>,
+        consensus: &SimpleConsensus<Arc<dyn BlockStorePort>>,
         event: ConsensusEvent,
     ) -> anyhow::Result<ConsensusOutcome> {
         let decision = consensus.handle_event(event).await?;
@@ -264,7 +268,7 @@ impl Node {
                     let block_hash = block.hash.clone();
                     let height = block.height;
                     let producer = block.producer.clone();
-                    let inserted = chain_store.insert(block).await?;
+                    let inserted = chain_store.insert_block(block).await?;
                     if inserted {
                         tracing::info!(
                             %block_hash,
@@ -304,6 +308,8 @@ impl Node {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use async_trait::async_trait;
+    use p2p_chain_lib_chain::block::{Block, BlockHash};
     use p2p_chain_lib_consensus::ConsensusCommand;
     use p2p_chain_lib_network::{
         PeerAddress,
@@ -311,7 +317,90 @@ mod tests {
         service::{NetworkConfig, NetworkService},
     };
     use p2p_chain_lib_ports::PeerId;
+    use p2p_chain_lib_storage::ChainStore;
     use tokio::{sync::mpsc, time::timeout};
+
+    struct RecordingNetwork(mpsc::Sender<(PeerId, BlockHash, Option<Block>)>);
+
+    #[async_trait]
+    impl BlockRequestPort for RecordingNetwork {
+        async fn request_block(&self, _: PeerId, _: BlockHash) -> anyhow::Result<()> {
+            anyhow::bail!("unexpected block request")
+        }
+    }
+
+    #[async_trait]
+    impl BlockNetworkPort for RecordingNetwork {
+        async fn broadcast_block(&self, _: Block) -> anyhow::Result<()> {
+            anyhow::bail!("unexpected broadcast")
+        }
+
+        async fn broadcast_chain_tip(&self, _: ChainTip) -> anyhow::Result<()> {
+            anyhow::bail!("unexpected tip broadcast")
+        }
+
+        async fn send_block(&self, peer: PeerId, block: Block) -> anyhow::Result<()> {
+            self.0.send((peer, block.hash.clone(), Some(block))).await?;
+            Ok(())
+        }
+
+        async fn send_block_not_found(&self, peer: PeerId, hash: BlockHash) -> anyhow::Result<()> {
+            self.0.send((peer, hash, None)).await?;
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn serves_known_and_missing_blocks_through_the_network_port() -> anyhow::Result<()> {
+        let (mut node, service) = lifecycle_node()?;
+        let (responses_tx, mut responses_rx) = mpsc::channel(2);
+        let network: Arc<dyn BlockNetworkPort> = Arc::new(RecordingNetwork(responses_tx));
+        node.runtime.network = network.clone();
+        node.runtime.sync = SyncService::new(
+            network,
+            node.runtime.chain_store.clone(),
+            node.runtime.peer_reputation.clone(),
+        );
+        let (events_tx, events_rx) = mpsc::channel(2);
+        node.runtime.network_event_rx = events_rx;
+        drop(service);
+        let decision = node
+            .runtime
+            .consensus
+            .handle_event(ConsensusEvent::Tick)
+            .await?;
+        let block = decision
+            .commands
+            .into_iter()
+            .find_map(|command| match command {
+                ConsensusCommand::StoreBlock(block) => Some(block),
+                _ => None,
+            })
+            .expect("tick produces a block");
+        node.runtime.chain_store.insert_block(block.clone()).await?;
+        let missing = BlockHash::from_u8(255);
+        let peer = PeerId::from("requester");
+        for hash in [block.hash.clone(), missing.clone()] {
+            events_tx
+                .send(NetworkEvent::BlockRequestReceived {
+                    peer_id: peer.clone(),
+                    block_hash: hash,
+                })
+                .await?;
+        }
+        let token = CancellationToken::new();
+        let task = tokio::spawn(node.run(token.clone()));
+        let responses = timeout(Duration::from_secs(1), async {
+            (responses_rx.recv().await, responses_rx.recv().await)
+        })
+        .await;
+        token.cancel();
+        task.await??;
+        let (found, absent) = responses?;
+        assert_eq!(found, Some((peer.clone(), block.hash.clone(), Some(block))));
+        assert_eq!(absent, Some((peer, missing, None)));
+        Ok(())
+    }
 
     fn lifecycle_node() -> anyhow::Result<(Node, NetworkService)> {
         let (event_tx, event_rx) = mpsc::channel(8);
@@ -332,7 +421,9 @@ mod tests {
             reputation.clone(),
             score_event_rx,
         )?;
-        let store = ChainStore::new();
+        let network: Arc<dyn BlockNetworkPort> = Arc::new(network);
+        let reputation: Arc<dyn PeerReputationPort> = Arc::new(reputation);
+        let store: Arc<dyn BlockStorePort> = Arc::new(ChainStore::new());
         let node = Node::new(NodeRuntime {
             network: network.clone(),
             chain_store: store.clone(),
@@ -432,7 +523,9 @@ mod tests {
             peer_score.clone(),
             peer_score_event_rx,
         )?;
-        let chain_store = ChainStore::new();
+        let network: Arc<dyn BlockNetworkPort> = Arc::new(network);
+        let peer_score: Arc<dyn PeerReputationPort> = Arc::new(peer_score);
+        let chain_store: Arc<dyn BlockStorePort> = Arc::new(ChainStore::new());
         let cancellation_token = CancellationToken::new();
         let node = Node::new(NodeRuntime {
             network: network.clone(),
@@ -457,13 +550,19 @@ mod tests {
         }
 
         timeout(std::time::Duration::from_secs(5), async {
-            while chain_store.len().await != blocks.len() {
+            while chain_store.selected_tip().await != blocks.last().cloned() {
                 tokio::task::yield_now().await;
             }
         })
         .await
         .map_err(|_| anyhow::anyhow!("node did not rebuild the announced chain"))?;
-        assert_eq!(chain_store.tip().await, blocks.last().cloned());
+        assert_eq!(chain_store.selected_tip().await, blocks.last().cloned());
+        for block in &blocks {
+            assert_eq!(
+                chain_store.get_block(&block.hash).await.as_ref(),
+                Some(block)
+            );
+        }
 
         cancellation_token.cancel();
         node_task.await??;

@@ -2229,6 +2229,7 @@ name = "p2p-chain-lib-node"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "async-trait",
  "p2p-chain-lib-chain",
  "p2p-chain-lib-consensus",
  "p2p-chain-lib-mempool",

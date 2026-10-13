@@ -19,7 +19,7 @@ use libp2p::{
     },
 };
 use p2p_chain_lib_chain::block::{Block, BlockHash};
-use p2p_chain_lib_ports::{BlockRequestPort, NetworkEvent, PeerId};
+use p2p_chain_lib_ports::{BlockNetworkPort, BlockRequestPort, NetworkEvent, PeerId};
 use p2p_chain_lib_protocol::{
     codec,
     messages::{BlockAnnouncement, BlockRequest, BlockResponse, ChainTip, Transaction},
@@ -135,6 +135,29 @@ impl NetworkHandle {
 impl BlockRequestPort for NetworkHandle {
     async fn request_block(&self, peer_id: PeerId, block_hash: BlockHash) -> anyhow::Result<()> {
         self.request_block(peer_id, block_hash).await
+    }
+}
+
+#[async_trait]
+impl BlockNetworkPort for NetworkHandle {
+    async fn broadcast_block(&self, block: Block) -> anyhow::Result<()> {
+        self.broadcast_block(block).await
+    }
+
+    async fn broadcast_chain_tip(&self, tip: ChainTip) -> anyhow::Result<()> {
+        self.broadcast_chain_tip(tip).await
+    }
+
+    async fn send_block(&self, peer_id: PeerId, block: Block) -> anyhow::Result<()> {
+        self.send_block(peer_id, block).await
+    }
+
+    async fn send_block_not_found(
+        &self,
+        peer_id: PeerId,
+        block_hash: BlockHash,
+    ) -> anyhow::Result<()> {
+        self.send_block_not_found(peer_id, block_hash).await
     }
 }
 
