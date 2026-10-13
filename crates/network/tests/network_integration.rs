@@ -2,10 +2,7 @@ use std::{future::Future, time::Duration};
 
 use async_trait::async_trait;
 use libp2p::{Multiaddr, identity::Keypair};
-use p2p_chain_lib_chain::{
-    block::{Block, BlockHash},
-    store::ChainStore,
-};
+use p2p_chain_lib_chain::block::{Block, BlockHash};
 use p2p_chain_lib_network::{
     PeerAddress, PeerId,
     peer_score::{PeerScoreActor, PeerScoreHandle},
@@ -13,6 +10,7 @@ use p2p_chain_lib_network::{
 };
 use p2p_chain_lib_ports::{NetworkEvent, PeerReputationPort};
 use p2p_chain_lib_protocol::messages::{ChainTip, Transaction, TransactionId};
+use p2p_chain_lib_storage::ChainStore;
 use p2p_chain_lib_sync::SyncService;
 use sha2::{Digest, Sha256};
 use tokio::{

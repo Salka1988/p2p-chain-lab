@@ -9,8 +9,9 @@ use std::{
 };
 
 use anyhow::{Context, ensure};
-use p2p_chain_lib_chain::{block::Block, store::ChainStore};
+use p2p_chain_lib_chain::block::Block;
 use p2p_chain_lib_consensus::{SimpleConsensus, validator_id_from_seed};
+use p2p_chain_lib_storage::ChainStore;
 
 #[derive(Default)]
 struct Nodes {

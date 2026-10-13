@@ -15,6 +15,7 @@ p2p-chain-lib-network = { path = "../../crates/network" }
 p2p-chain-lib-node = { path = "../../crates/node" }
 p2p-chain-lib-ports = { path = "../../crates/ports" }
 p2p-chain-lib-sync = { path = "../../crates/sync" }
+p2p-chain-lib-storage = { path = "../../crates/storage" }
 tokio.workspace = true
 tokio-util.workspace = true
 tracing.workspace = true

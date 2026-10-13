@@ -12,6 +12,7 @@ p2p-chain-lib-network = { path = "../network" }
 p2p-chain-lib-ports = { path = "../ports" }
 p2p-chain-lib-protocol = { path = "../protocol" }
 p2p-chain-lib-sync = { path = "../sync" }
+p2p-chain-lib-storage = { path = "../storage" }
 tokio.workspace = true
 tokio-util.workspace = true
 tracing.workspace = true

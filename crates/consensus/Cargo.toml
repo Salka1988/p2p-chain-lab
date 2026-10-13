@@ -11,3 +11,6 @@ p2p-chain-lib-ports = { path = "../ports" }
 p2p-chain-lib-protocol = { path = "../protocol" }
 sha2.workspace = true
 tokio.workspace = true
+
+[dev-dependencies]
+p2p-chain-lib-storage = { path = "../storage" }

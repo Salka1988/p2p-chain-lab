@@ -1,6 +1,5 @@
 use std::time::Duration;
 
-use p2p_chain_lib_chain::store::ChainStore;
 use p2p_chain_lib_consensus::{
     ConsensusCommand, ConsensusEvent, ConsensusOutcome, SimpleConsensus,
 };
@@ -8,6 +7,7 @@ use p2p_chain_lib_mempool::Mempool;
 use p2p_chain_lib_network::{peer_score::PeerScoreHandle, service::NetworkHandle};
 use p2p_chain_lib_ports::{NetworkEvent, PeerReputationPort};
 use p2p_chain_lib_protocol::{messages::ChainTip, validation::validate_transaction};
+use p2p_chain_lib_storage::ChainStore;
 use p2p_chain_lib_sync::SyncService;
 use tokio::{sync::mpsc, task::JoinSet};
 use tokio_util::sync::CancellationToken;

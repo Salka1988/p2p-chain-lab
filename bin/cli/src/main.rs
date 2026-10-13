@@ -4,7 +4,6 @@ mod task_group;
 use std::time::Duration;
 
 use crate::task_group::TaskGroup;
-use p2p_chain_lib_chain::store::ChainStore;
 use p2p_chain_lib_consensus::{SimpleConsensus, validator_id_from_seed};
 use p2p_chain_lib_mempool::Mempool;
 use p2p_chain_lib_network::{
@@ -12,6 +11,7 @@ use p2p_chain_lib_network::{
     service::{NetworkConfig, NetworkService},
 };
 use p2p_chain_lib_node::node::{Node, NodeRuntime};
+use p2p_chain_lib_storage::ChainStore;
 use p2p_chain_lib_sync::SyncService;
 use tracing_subscriber::EnvFilter;
 

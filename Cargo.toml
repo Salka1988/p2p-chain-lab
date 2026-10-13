@@ -9,6 +9,7 @@ members = [
     "crates/ports",
     "crates/protocol",
     "crates/sync",
+    "crates/storage",
 ]
 
 resolver = "2"

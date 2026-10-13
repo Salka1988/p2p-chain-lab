@@ -407,7 +407,7 @@ fn block_hash(block: &Block) -> BlockHash {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use p2p_chain_lib_chain::store::ChainStore;
+    use p2p_chain_lib_storage::ChainStore;
 
     #[tokio::test]
     async fn configured_genesis_is_shared_and_anchors_production() -> anyhow::Result<()> {

@@ -41,7 +41,7 @@ This fixes write-error ordering; power-loss durability and incremental storage
 remain outside this change.
 
 Sources: [consensus](crates/consensus/src/lib.rs),
-[storage](crates/chain/src/store.rs).
+[storage](crates/storage/src/lib.rs).
 
 Consensus updates its next height before StoreBlock executes. ChainStore inserts
 into memory before writing the file. A failed write leaves memory ahead of disk;
@@ -153,7 +153,25 @@ the distinction behind the earlier sync bug.
 
 #### 5. Domain and infrastructure responsibilities still overlap
 
-Sources: [chain storage](crates/chain/src/store.rs),
+Status: storage separation fixed in the working tree. The chain crate retains
+Block, BlockHash, and BlockStorePort. The new storage adapter crate owns
+ChainStore, its memory cache, filesystem I/O, snapshot serialization, and storage
+tests. The domain no longer depends on Tokio or bincode. Consensus and sync use
+the storage adapter only as a dev-dependency for tests.
+
+The CLI constructs the storage adapter; NodeRuntime remains non-generic and
+still names concrete adapters as runtime wiring. Turning the node crate into a
+fully transport/storage-independent application layer remains a separate part
+of this finding, not something this extraction claims to resolve.
+
+Persistence format and write-before-memory ordering are unchanged. Existing
+reopen, failed-write/retry, and genesis-mismatch tests exercise the moved adapter.
+
+Verification: workspace library/binary tests, workspace Clippy with warnings
+denied, formatting, and the six-node late-join test passed (22.59s).
+
+Sources: [storage adapter](crates/storage/src/lib.rs),
+[storage port](crates/chain/src/store.rs),
 [node dependencies](crates/node/src/node.rs).
 
 Chain storage combines a port, memory storage, filesystem operations, and
@@ -183,7 +201,7 @@ If skipped: a new adapter can compile while supplying incorrect chain state.
 
 #### 7. Persistence rewrites the whole chain for every block
 
-Source: [persistence implementation](crates/chain/src/store.rs).
+Source: [persistence implementation](crates/storage/src/lib.rs).
 
 Each insertion clones and serializes all blocks, then performs synchronous
 filesystem operations while holding the store lock. Each insertion becomes more

@@ -2156,9 +2156,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-trait",
- "bincode",
  "serde",
- "tokio",
 ]
 
 [[package]]
@@ -2174,6 +2172,7 @@ dependencies = [
  "p2p-chain-lib-network",
  "p2p-chain-lib-node",
  "p2p-chain-lib-ports",
+ "p2p-chain-lib-storage",
  "p2p-chain-lib-sync",
  "serde",
  "tempfile",
@@ -2192,6 +2191,7 @@ dependencies = [
  "p2p-chain-lib-chain",
  "p2p-chain-lib-ports",
  "p2p-chain-lib-protocol",
+ "p2p-chain-lib-storage",
  "sha2",
  "tokio",
 ]
@@ -2215,6 +2215,7 @@ dependencies = [
  "p2p-chain-lib-chain",
  "p2p-chain-lib-ports",
  "p2p-chain-lib-protocol",
+ "p2p-chain-lib-storage",
  "p2p-chain-lib-sync",
  "serde",
  "sha2",
@@ -2234,6 +2235,7 @@ dependencies = [
  "p2p-chain-lib-network",
  "p2p-chain-lib-ports",
  "p2p-chain-lib-protocol",
+ "p2p-chain-lib-storage",
  "p2p-chain-lib-sync",
  "tokio",
  "tokio-util",
@@ -2261,6 +2263,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "p2p-chain-lib-storage"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "bincode",
+ "p2p-chain-lib-chain",
+ "tokio",
+]
+
+[[package]]
 name = "p2p-chain-lib-sync"
 version = "0.1.0"
 dependencies = [
@@ -2269,6 +2282,7 @@ dependencies = [
  "p2p-chain-lib-chain",
  "p2p-chain-lib-ports",
  "p2p-chain-lib-protocol",
+ "p2p-chain-lib-storage",
  "tokio",
  "tracing",
 ]
