@@ -1,6 +1,6 @@
 use p2p_chain_lib_chain::block::Block;
 
-use crate::messages::{BlockAnnouncement, Transaction};
+use crate::messages::{BlockAnnouncement, ChainTip, Transaction};
 
 pub fn validate_transaction(tx: &Transaction) -> anyhow::Result<()> {
     anyhow::ensure!(!tx.id.is_zero(), "transaction id cannot be zero");
@@ -16,6 +16,11 @@ pub fn validate_block_announcement(announcement: &BlockAnnouncement) -> anyhow::
         !announcement.block_hash.is_zero(),
         "block hash cannot be zero"
     );
+    Ok(())
+}
+
+pub fn validate_chain_tip(tip: &ChainTip) -> anyhow::Result<()> {
+    anyhow::ensure!(!tip.block_hash.is_zero(), "block hash cannot be zero");
     Ok(())
 }
 
@@ -76,6 +81,24 @@ mod tests {
 
         assert!(
             validate_block_announcement(&BlockAnnouncement {
+                block_hash: BlockHash::zero(),
+                height: 1,
+            })
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn validates_chain_tip_shape() {
+        assert!(
+            validate_chain_tip(&ChainTip {
+                block_hash: BlockHash::from_u8(1),
+                height: 1,
+            })
+            .is_ok()
+        );
+        assert!(
+            validate_chain_tip(&ChainTip {
                 block_hash: BlockHash::zero(),
                 height: 1,
             })

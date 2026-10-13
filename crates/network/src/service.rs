@@ -13,13 +13,17 @@ use libp2p::{
     identity::Keypair,
     kad::{self, Quorum},
     multiaddr, request_response,
-    swarm::SwarmEvent,
+    swarm::{
+        SwarmEvent,
+        dial_opts::{DialOpts, PeerCondition},
+    },
 };
 use p2p_chain_lib_chain::block::{Block, BlockHash};
 use p2p_chain_lib_ports::{BlockRequestPort, NetworkEvent, PeerId};
 use p2p_chain_lib_protocol::{
     codec,
-    messages::{BlockAnnouncement, BlockRequest, BlockResponse, Transaction},
+    messages::{BlockAnnouncement, BlockRequest, BlockResponse, ChainTip, Transaction},
+    validation::{validate_block, validate_chain_tip},
 };
 use sha2::{Digest, Sha256};
 use tokio::sync::mpsc;
@@ -27,7 +31,10 @@ use tokio_util::sync::CancellationToken;
 
 use crate::{
     PeerAddress,
-    behaviour::{BLOCK_ANNOUNCEMENT_TOPIC, NetworkBehaviour, NetworkBehaviourEvent, TX_TOPIC},
+    behaviour::{
+        BLOCK_ANNOUNCEMENT_TOPIC, BLOCK_TOPIC, CHAIN_TIP_TOPIC, NetworkBehaviour,
+        NetworkBehaviourEvent, TX_TOPIC,
+    },
     command::NetworkCommand,
     peer_score::{PeerScoreEvent, PeerScoreHandle},
 };
@@ -83,6 +90,10 @@ impl NetworkHandle {
 
     pub async fn broadcast_block(&self, block: Block) -> anyhow::Result<()> {
         self.send(NetworkCommand::BroadcastBlock(block)).await
+    }
+
+    pub async fn broadcast_chain_tip(&self, tip: ChainTip) -> anyhow::Result<()> {
+        self.send(NetworkCommand::BroadcastChainTip(tip)).await
     }
 
     pub async fn request_block(
@@ -254,6 +265,7 @@ fn event_peer_id(event: &NetworkEvent) -> Option<&PeerId> {
     match event {
         NetworkEvent::TransactionReceived { peer_id, .. }
         | NetworkEvent::BlockAnnouncementReceived { peer_id, .. }
+        | NetworkEvent::ChainTipReceived { peer_id, .. }
         | NetworkEvent::BlockReceived { peer_id, .. }
         | NetworkEvent::BlockNotFound { peer_id, .. }
         | NetworkEvent::BlockRequestFailed { peer_id, .. }
@@ -410,19 +422,26 @@ impl NetworkService {
                     .behaviour_mut()
                     .kademlia
                     .add_address(&peer_id, peer_addr.clone());
+                swarm.dial(
+                    DialOpts::peer_id(peer_id)
+                        .condition(PeerCondition::Disconnected)
+                        .addresses(vec![peer_addr])
+                        // Reusing the listening port is useful for NAT traversal but
+                        // fails for multiple localhost nodes on macOS.
+                        .allocate_new_port()
+                        .build(),
+                )?;
             } else {
                 tracing::debug!(
                     %peer,
                     "bootstrap peer address has no /p2p/<peer-id>; dialing without kademlia address registration"
                 );
-            }
-            swarm.dial(peer_addr)?;
-        }
-
-        if !self.config.bootstrap_peers.is_empty() {
-            match swarm.behaviour_mut().kademlia.bootstrap() {
-                Ok(query_id) => tracing::info!(?query_id, "kademlia bootstrap started"),
-                Err(error) => tracing::warn!(?error, "kademlia bootstrap could not start"),
+                swarm.dial(
+                    DialOpts::unknown_peer_id()
+                        .address(peer_addr)
+                        .allocate_new_port()
+                        .build(),
+                )?;
             }
         }
 
@@ -568,6 +587,22 @@ impl NetworkService {
                 ) {
                     tracing::warn!(?error, "failed to publish block announcement");
                 }
+                let payload = codec::encode(&block)?;
+                if let Err(error) = swarm
+                    .behaviour_mut()
+                    .gossipsub
+                    .publish(gossipsub::IdentTopic::new(BLOCK_TOPIC), payload)
+                {
+                    tracing::warn!(?error, "failed to publish block");
+                }
+                let tip = ChainTip {
+                    block_hash: block.hash,
+                    height: block.height,
+                };
+                self.publish_chain_tip(swarm, &tip);
+            }
+            NetworkCommand::BroadcastChainTip(tip) => {
+                self.publish_chain_tip(swarm, &tip);
             }
             NetworkCommand::RequestBlock {
                 peer_id,
@@ -619,6 +654,23 @@ impl NetworkService {
         Ok(())
     }
 
+    fn publish_chain_tip(&self, swarm: &mut Swarm<NetworkBehaviour>, tip: &ChainTip) {
+        let payload = match codec::encode(tip) {
+            Ok(payload) => payload,
+            Err(error) => {
+                tracing::warn!(?error, "failed to encode chain tip");
+                return;
+            }
+        };
+        if let Err(error) = swarm
+            .behaviour_mut()
+            .gossipsub
+            .publish(gossipsub::IdentTopic::new(CHAIN_TIP_TOPIC), payload)
+        {
+            tracing::warn!(?error, "failed to publish chain tip");
+        }
+    }
+
     async fn handle_swarm_event(
         &mut self,
         swarm: &mut Swarm<NetworkBehaviour>,
@@ -653,12 +705,17 @@ impl NetworkService {
                     let _ = swarm.disconnect_peer_id(peer_id);
                     return Ok(());
                 }
-                let address = endpoint.get_remote_address().clone();
-                swarm.add_peer_address(peer_id, address.clone());
-                swarm
-                    .behaviour_mut()
-                    .kademlia
-                    .add_address(&peer_id, address);
+                // On an inbound connection the remote address is the peer's
+                // ephemeral source port, not a dialable listener. Identify
+                // supplies the peer's actual listen addresses shortly after.
+                if endpoint.is_dialer() {
+                    let address = endpoint.get_remote_address().clone();
+                    swarm.add_peer_address(peer_id, address.clone());
+                    swarm
+                        .behaviour_mut()
+                        .kademlia
+                        .add_address(&peer_id, address);
+                }
                 self.peer_score.connected(peer_id_string.clone()).await?;
                 self.emit_event(swarm, None, NetworkEvent::PeerConnected(peer_id_string))
                     .await?;
@@ -858,7 +915,12 @@ impl NetworkService {
                         }
 
                         if !swarm.is_connected(&peer_id) {
-                            match swarm.dial(peer_id) {
+                            match swarm.dial(
+                                DialOpts::peer_id(peer_id)
+                                    .condition(PeerCondition::Disconnected)
+                                    .allocate_new_port()
+                                    .build(),
+                            ) {
                                 Ok(()) => {
                                     tracing::debug!(peer_id = %peer_id, "dial discovered peer");
                                 }
@@ -1007,7 +1069,12 @@ impl NetworkService {
         }
 
         if !swarm.is_connected(&peer_id) {
-            match swarm.dial(peer_id) {
+            match swarm.dial(
+                DialOpts::peer_id(peer_id)
+                    .condition(PeerCondition::Disconnected)
+                    .allocate_new_port()
+                    .build(),
+            ) {
                 Ok(()) => {
                     tracing::debug!(validator_id = %validator_id, peer_id = %peer_id, "dial validator from dht record");
                 }
@@ -1166,6 +1233,56 @@ impl NetworkService {
                     peer_id,
                     announcement,
                 },
+            )
+            .await?;
+        } else if message.topic == gossipsub::IdentTopic::new(BLOCK_TOPIC).hash() {
+            if !self
+                .admit_peer_event(swarm, ingress_peer_id.clone(), IngressKind::Gossip)
+                .await?
+            {
+                return Ok(());
+            }
+            let block = match codec::decode::<Block>(&message.data).and_then(|block| {
+                validate_block(&block)?;
+                Ok(block)
+            }) {
+                Ok(block) => block,
+                Err(error) => {
+                    self.peer_score
+                        .bad_message(peer_id, format!("invalid block payload: {error}"))
+                        .await?;
+                    return Ok(());
+                }
+            };
+            self.emit_event(
+                swarm,
+                Some(ingress_peer_id),
+                NetworkEvent::BlockReceived { peer_id, block },
+            )
+            .await?;
+        } else if message.topic == gossipsub::IdentTopic::new(CHAIN_TIP_TOPIC).hash() {
+            if !self
+                .admit_peer_event(swarm, ingress_peer_id.clone(), IngressKind::Gossip)
+                .await?
+            {
+                return Ok(());
+            }
+            let tip = match codec::decode::<ChainTip>(&message.data).and_then(|tip| {
+                validate_chain_tip(&tip)?;
+                Ok(tip)
+            }) {
+                Ok(tip) => tip,
+                Err(error) => {
+                    self.peer_score
+                        .bad_message(peer_id, format!("invalid chain tip payload: {error}"))
+                        .await?;
+                    return Ok(());
+                }
+            };
+            self.emit_event(
+                swarm,
+                Some(ingress_peer_id),
+                NetworkEvent::ChainTipReceived { peer_id, tip },
             )
             .await?;
         }

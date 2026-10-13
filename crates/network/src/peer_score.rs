@@ -81,8 +81,15 @@ impl PeerScoreHandle {
                 );
                 Ok(())
             }
-            Err(mpsc::error::TrySendError::Closed(_)) => {
-                anyhow::bail!("peer score receiver closed")
+            Err(mpsc::error::TrySendError::Closed(command)) => {
+                // The scorer is a best-effort telemetry worker. During shutdown its
+                // cancellation token can win the race with libp2p's final connection
+                // events, so losing this update must not keep the network task alive.
+                tracing::debug!(
+                    ?command,
+                    "dropping peer score command because actor stopped"
+                );
+                Ok(())
             }
         }
     }
@@ -249,6 +256,16 @@ mod tests {
             Some(PeerScoreCommand::PeerConnected(PeerId::from("peer-a")))
         );
         assert!(command_rx.try_recv().is_err());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn drops_commands_when_actor_has_stopped() -> anyhow::Result<()> {
+        let (command_tx, command_rx) = mpsc::channel(1);
+        drop(command_rx);
+        let handle = PeerScoreHandle::new(command_tx);
+
+        handle.connected(PeerId::from("peer-a")).await?;
         Ok(())
     }
 }

@@ -1,6 +1,6 @@
 use p2p_chain_lib_chain::block::{Block, BlockHash};
 use p2p_chain_lib_ports::PeerId;
-use p2p_chain_lib_protocol::messages::Transaction;
+use p2p_chain_lib_protocol::messages::{ChainTip, Transaction};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum NetworkCommand {
@@ -15,4 +15,5 @@ pub(crate) enum NetworkCommand {
         block: Option<Block>,
     },
     BroadcastBlock(Block),
+    BroadcastChainTip(ChainTip),
 }

@@ -39,6 +39,12 @@ pub struct BlockAnnouncement {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ChainTip {
+    pub block_hash: BlockHash,
+    pub height: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BlockRequest {
     pub block_hash: BlockHash,
 }

@@ -5,7 +5,7 @@ use p2p_chain_lib_consensus::{ConsensusCommand, ConsensusEvent, SimpleConsensus}
 use p2p_chain_lib_mempool::Mempool;
 use p2p_chain_lib_network::{peer_score::PeerScoreHandle, service::NetworkHandle};
 use p2p_chain_lib_ports::{NetworkEvent, PeerReputationPort};
-use p2p_chain_lib_protocol::validation::validate_transaction;
+use p2p_chain_lib_protocol::{messages::ChainTip, validation::validate_transaction};
 use p2p_chain_lib_sync::SyncService;
 use tokio::{sync::mpsc, task::JoinHandle};
 use tokio_util::sync::CancellationToken;
@@ -26,6 +26,9 @@ pub struct NodeRuntime {
     pub block_production_interval: Option<Duration>,
     pub cancellation_token: CancellationToken,
 }
+
+const CHAIN_TIP_REANNOUNCE_INTERVAL: Duration = Duration::from_secs(10);
+const CHAIN_TIP_SYNC_DELAY: Duration = Duration::from_millis(250);
 
 impl Node {
     pub fn new(runtime: NodeRuntime) -> Self {
@@ -63,6 +66,10 @@ impl Node {
             let mut block_production_ticker = runtime.block_production_interval.map(|interval| {
                 tokio::time::interval_at(tokio::time::Instant::now() + interval, interval)
             });
+            let mut chain_tip_ticker = tokio::time::interval_at(
+                tokio::time::Instant::now() + CHAIN_TIP_REANNOUNCE_INTERVAL,
+                CHAIN_TIP_REANNOUNCE_INTERVAL,
+            );
             let mut network_event_rx = runtime.network_event_rx;
             loop {
                 tokio::select! {
@@ -86,6 +93,16 @@ impl Node {
                             ConsensusEvent::Tick,
                         ).await {
                             tracing::warn!(?error, "failed to handle consensus tick");
+                        }
+                    }
+                    _ = chain_tip_ticker.tick() => {
+                        if let Some(tip) = runtime.chain_store.tip().await
+                            && let Err(error) = runtime.network.broadcast_chain_tip(ChainTip {
+                                block_hash: tip.hash,
+                                height: tip.height,
+                            }).await
+                        {
+                            tracing::warn!(?error, "failed to republish chain tip");
                         }
                     }
                     event = network_event_rx.recv() => {
@@ -134,13 +151,8 @@ impl Node {
                                 ).await {
                                     tracing::warn!(?error, "failed to handle block announcement through consensus");
                                 }
-                                if let Err(error) = runtime
-                                    .sync
-                                    .on_block_announcement(peer_id, announcement)
-                                    .await
-                                {
-                                    tracing::warn!(?error, "failed to handle block announcement through sync");
-                                }
+                                // The full block is delivered through gossip. Request/response
+                                // sync is reserved for a valid block whose parent is missing.
                             }
                             NetworkEvent::BlockReceived { peer_id, block } => {
                                 tracing::info!(
@@ -184,6 +196,21 @@ impl Node {
                                         }
                                     }
                                 }
+                            }
+                            NetworkEvent::ChainTipReceived { peer_id, tip } => {
+                                tracing::info!(
+                                    %peer_id,
+                                    block_hash = %tip.block_hash,
+                                    height = tip.height,
+                                    "chain tip received",
+                                );
+                                let sync = runtime.sync.clone();
+                                tokio::spawn(async move {
+                                    tokio::time::sleep(CHAIN_TIP_SYNC_DELAY).await;
+                                    if let Err(error) = sync.on_chain_tip(peer_id, tip).await {
+                                        tracing::warn!(?error, "failed to start chain-tip sync");
+                                    }
+                                });
                             }
                             NetworkEvent::BlockNotFound {
                                 peer_id,
@@ -250,9 +277,19 @@ impl Node {
         for command in consensus.handle_event(event).await? {
             match command {
                 ConsensusCommand::StoreBlock(block) => {
+                    let block_hash = block.hash.clone();
+                    let height = block.height;
+                    let producer = block.producer.clone();
                     let inserted = chain_store.insert(block).await?;
                     stored_block = true;
-                    tracing::debug!(inserted, "consensus block store insert finished");
+                    if inserted {
+                        tracing::info!(
+                            %block_hash,
+                            height,
+                            %producer,
+                            "chain advanced",
+                        );
+                    }
                 }
                 ConsensusCommand::BroadcastBlock(block) => {
                     tracing::info!(
@@ -278,5 +315,91 @@ impl Node {
         }
 
         Ok(stored_block)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use p2p_chain_lib_consensus::ConsensusCommand;
+    use p2p_chain_lib_network::{
+        PeerAddress,
+        peer_score::PeerScoreHandle,
+        service::{NetworkConfig, NetworkService},
+    };
+    use p2p_chain_lib_ports::PeerId;
+    use tokio::{sync::mpsc, time::timeout};
+
+    #[tokio::test]
+    async fn empty_node_rebuilds_a_chain_from_tip_first_blocks() -> anyhow::Result<()> {
+        let source_consensus = SimpleConsensus::new("node-a", ChainStore::new());
+        let mut blocks = Vec::new();
+        for _ in 0..3 {
+            let commands = source_consensus.handle_event(ConsensusEvent::Tick).await?;
+            let block = commands
+                .into_iter()
+                .find_map(|command| match command {
+                    ConsensusCommand::StoreBlock(block) => Some(block),
+                    _ => None,
+                })
+                .ok_or_else(|| anyhow::anyhow!("expected produced block"))?;
+            blocks.push(block);
+        }
+
+        let (network_event_tx, network_event_rx) = mpsc::channel(8);
+        let (peer_score_command_tx, _peer_score_command_rx) = mpsc::channel(8);
+        let (_peer_score_event_tx, peer_score_event_rx) = mpsc::channel(8);
+        let peer_score = PeerScoreHandle::new(peer_score_command_tx);
+        let (_network_service, network) = NetworkService::new(
+            NetworkConfig {
+                listen_addr: PeerAddress::from("/ip4/127.0.0.1/tcp/0"),
+                bootstrap_peers: Vec::new(),
+                node_key_seed: Some("node-a".to_string()),
+                validator_id: None,
+                validators: Vec::new(),
+                max_gossip_events_per_second: 64,
+                max_block_requests_per_second: 16,
+            },
+            network_event_tx.clone(),
+            peer_score.clone(),
+            peer_score_event_rx,
+        )?;
+        let chain_store = ChainStore::new();
+        let cancellation_token = CancellationToken::new();
+        let node = Node::new(NodeRuntime {
+            network: network.clone(),
+            chain_store: chain_store.clone(),
+            mempool: Mempool::new(),
+            consensus: SimpleConsensus::new("node-a", chain_store.clone()),
+            sync: SyncService::new(network, chain_store.clone(), peer_score.clone()),
+            peer_reputation: peer_score,
+            network_event_rx,
+            block_production_interval: None,
+            cancellation_token: cancellation_token.clone(),
+        });
+        let node_task = tokio::spawn(node.run(cancellation_token.clone()));
+
+        for block in blocks.iter().rev() {
+            network_event_tx
+                .send(NetworkEvent::BlockReceived {
+                    peer_id: PeerId::from("peer-a"),
+                    block: block.clone(),
+                })
+                .await?;
+            tokio::task::yield_now().await;
+        }
+
+        timeout(std::time::Duration::from_secs(1), async {
+            while chain_store.len().await != blocks.len() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .map_err(|_| anyhow::anyhow!("node did not rebuild the announced chain"))?;
+        assert_eq!(chain_store.tip().await, blocks.last().cloned());
+
+        cancellation_token.cancel();
+        node_task.await??;
+        Ok(())
     }
 }

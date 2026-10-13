@@ -1,14 +1,19 @@
 use std::{future::Future, time::Duration};
 
+use async_trait::async_trait;
 use libp2p::{Multiaddr, identity::Keypair};
-use p2p_chain_lib_chain::block::{Block, BlockHash};
+use p2p_chain_lib_chain::{
+    block::{Block, BlockHash},
+    store::ChainStore,
+};
 use p2p_chain_lib_network::{
     PeerAddress, PeerId,
     peer_score::{PeerScoreActor, PeerScoreHandle},
     service::{NetworkConfig, NetworkHandle, NetworkService},
 };
-use p2p_chain_lib_ports::NetworkEvent;
-use p2p_chain_lib_protocol::messages::{Transaction, TransactionId};
+use p2p_chain_lib_ports::{NetworkEvent, PeerReputationPort};
+use p2p_chain_lib_protocol::messages::{ChainTip, Transaction, TransactionId};
+use p2p_chain_lib_sync::SyncService;
 use sha2::{Digest, Sha256};
 use tokio::{
     sync::mpsc,
@@ -18,6 +23,20 @@ use tokio::{
 use tokio_util::sync::CancellationToken;
 
 const TEST_TIMEOUT: Duration = Duration::from_secs(10);
+
+#[derive(Clone)]
+struct NoopReputation;
+
+#[async_trait]
+impl PeerReputationPort for NoopReputation {
+    async fn report_good_peer(&self, _peer_id: PeerId, _reason: String) -> anyhow::Result<()> {
+        Ok(())
+    }
+
+    async fn report_bad_peer(&self, _peer_id: PeerId, _reason: String) -> anyhow::Result<()> {
+        Ok(())
+    }
+}
 
 struct TestNetwork {
     handle: NetworkHandle,
@@ -343,6 +362,100 @@ async fn block_announcement_reaches_connected_peer() -> anyhow::Result<()> {
         },
     )
     .await?;
+
+    second.stop().await?;
+    first.stop().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn block_broadcast_reaches_connected_peer() -> anyhow::Result<()> {
+    let (first, mut second, _) = connected_pair().await?;
+    let expected = block(10, 0);
+
+    repeat_until_event(
+        || first.handle.broadcast_block(expected.clone()),
+        &mut second,
+        |event| match event {
+            NetworkEvent::BlockReceived { block, .. } if block == expected => Some(()),
+            _ => None,
+        },
+    )
+    .await?;
+
+    second.stop().await?;
+    first.stop().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn chain_tip_broadcast_reaches_connected_peer() -> anyhow::Result<()> {
+    let (first, mut second, _) = connected_pair().await?;
+    let expected = ChainTip {
+        block_hash: BlockHash::from_u8(12),
+        height: 42,
+    };
+
+    repeat_until_event(
+        || first.handle.broadcast_chain_tip(expected.clone()),
+        &mut second,
+        |event| match event {
+            NetworkEvent::ChainTipReceived { tip, .. } if tip == expected => Some(()),
+            _ => None,
+        },
+    )
+    .await?;
+
+    second.stop().await?;
+    first.stop().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn late_joiner_requests_an_advertised_chain_tip() -> anyhow::Result<()> {
+    let (mut first, mut second, first_peer_id) = connected_pair().await?;
+    let expected = block(13, 0);
+    let tip = ChainTip {
+        block_hash: expected.hash.clone(),
+        height: expected.height,
+    };
+
+    let (tip_peer_id, received_tip) = repeat_until_event(
+        || first.handle.broadcast_chain_tip(tip.clone()),
+        &mut second,
+        |event| match event {
+            NetworkEvent::ChainTipReceived { peer_id, tip } => Some((peer_id, tip)),
+            _ => None,
+        },
+    )
+    .await?;
+    assert_eq!(tip_peer_id, first_peer_id);
+    assert_eq!(received_tip, tip);
+
+    let sync = SyncService::new(second.handle.clone(), ChainStore::new(), NoopReputation);
+    sync.on_chain_tip(tip_peer_id, received_tip).await?;
+
+    let request_peer_id = first
+        .wait_for_event(|event| match event {
+            NetworkEvent::BlockRequestReceived {
+                peer_id,
+                block_hash,
+            } if block_hash == expected.hash => Some(peer_id),
+            _ => None,
+        })
+        .await?;
+    first
+        .handle
+        .send_block(request_peer_id, expected.clone())
+        .await?;
+
+    let received = second
+        .wait_for_event(|event| match event {
+            NetworkEvent::BlockReceived { block, .. } if block.hash == expected.hash => Some(block),
+            _ => None,
+        })
+        .await?;
+    assert_eq!(received, expected);
 
     second.stop().await?;
     first.stop().await?;

@@ -16,3 +16,6 @@ sha2.workspace = true
 tokio.workspace = true
 tokio-util.workspace = true
 tracing.workspace = true
+
+[dev-dependencies]
+p2p-chain-lib-sync = { path = "../sync" }

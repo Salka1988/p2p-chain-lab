@@ -2,7 +2,7 @@ use std::fmt;
 
 use async_trait::async_trait;
 use p2p_chain_lib_chain::block::{Block, BlockHash};
-use p2p_chain_lib_protocol::messages::{BlockAnnouncement, Transaction};
+use p2p_chain_lib_protocol::messages::{BlockAnnouncement, ChainTip, Transaction};
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct PeerId(String);
@@ -76,6 +76,10 @@ pub enum NetworkEvent {
     BlockAnnouncementReceived {
         peer_id: PeerId,
         announcement: BlockAnnouncement,
+    },
+    ChainTipReceived {
+        peer_id: PeerId,
+        tip: ChainTip,
     },
     BlockReceived {
         peer_id: PeerId,

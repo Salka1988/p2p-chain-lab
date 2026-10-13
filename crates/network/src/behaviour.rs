@@ -10,6 +10,8 @@ use p2p_chain_lib_protocol::messages::{BlockRequest, BlockResponse};
 
 pub(crate) const TX_TOPIC: &str = "p2p-chain-lib/tx/1";
 pub(crate) const BLOCK_ANNOUNCEMENT_TOPIC: &str = "p2p-chain-lib/block-announcement/1";
+pub(crate) const BLOCK_TOPIC: &str = "p2p-chain-lib/block/1";
+pub(crate) const CHAIN_TIP_TOPIC: &str = "p2p-chain-lib/chain-tip/1";
 pub(crate) const BLOCK_REQUEST_PROTOCOL: &str = "/p2p-chain-lib/block-request/1";
 pub(crate) const IDENTIFY_PROTOCOL_VERSION: &str = "p2p-chain-lib/1.0.0";
 pub(crate) const KAD_PROTOCOL_NAME: &str = "/p2p-chain-lib/kad/1.0.0";
@@ -45,6 +47,12 @@ impl NetworkBehaviour {
         gossipsub
             .subscribe(&gossipsub::IdentTopic::new(BLOCK_ANNOUNCEMENT_TOPIC))
             .context("failed to subscribe to block announcement topic")?;
+        gossipsub
+            .subscribe(&gossipsub::IdentTopic::new(BLOCK_TOPIC))
+            .context("failed to subscribe to block topic")?;
+        gossipsub
+            .subscribe(&gossipsub::IdentTopic::new(CHAIN_TIP_TOPIC))
+            .context("failed to subscribe to chain tip topic")?;
 
         let block_request_response = cbor::Behaviour::new(
             [(

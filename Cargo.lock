@@ -2194,6 +2194,7 @@ dependencies = [
  "p2p-chain-lib-chain",
  "p2p-chain-lib-ports",
  "p2p-chain-lib-protocol",
+ "p2p-chain-lib-sync",
  "serde",
  "sha2",
  "tokio",

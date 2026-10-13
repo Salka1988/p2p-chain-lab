@@ -9,8 +9,8 @@ use p2p_chain_lib_chain::block::{Block, BlockHash};
 use p2p_chain_lib_chain::store::BlockStorePort;
 use p2p_chain_lib_ports::{BlockRequestPort, PeerId, PeerReputationPort};
 use p2p_chain_lib_protocol::{
-    messages::BlockAnnouncement,
-    validation::{validate_block, validate_block_announcement},
+    messages::ChainTip,
+    validation::{validate_block, validate_chain_tip},
 };
 use tokio::sync::Mutex;
 
@@ -20,11 +20,7 @@ const MAX_ORPHAN_BLOCK_BYTES: usize = 16 * 1024 * 1024;
 
 #[async_trait]
 pub trait SyncPort: Clone + Send + Sync + 'static {
-    async fn on_block_announcement(
-        &self,
-        peer_id: PeerId,
-        announcement: BlockAnnouncement,
-    ) -> anyhow::Result<()>;
+    async fn on_chain_tip(&self, peer_id: PeerId, tip: ChainTip) -> anyhow::Result<()>;
 
     async fn on_block_received(&self, block_hash: &BlockHash) -> anyhow::Result<()>;
 }
@@ -61,38 +57,26 @@ where
         }
     }
 
-    pub async fn on_block_announcement(
-        &self,
-        peer_id: PeerId,
-        announcement: BlockAnnouncement,
-    ) -> anyhow::Result<()> {
+    pub async fn on_chain_tip(&self, peer_id: PeerId, tip: ChainTip) -> anyhow::Result<()> {
         tracing::debug!(
             %peer_id,
-            block_hash = %announcement.block_hash,
-            height = announcement.height,
-            "handling block announcement",
+            block_hash = %tip.block_hash,
+            height = tip.height,
+            "handling chain tip",
         );
 
-        if let Err(error) = validate_block_announcement(&announcement) {
+        if let Err(error) = validate_chain_tip(&tip) {
             self.peer_reputation
-                .report_bad_peer(
-                    peer_id,
-                    format!("invalid block announcement for sync: {error}"),
-                )
+                .report_bad_peer(peer_id, format!("invalid chain tip for sync: {error}"))
                 .await?;
             return Ok(());
         }
 
-        if self
-            .chain_store
-            .get_block(&announcement.block_hash)
-            .await
-            .is_none()
-        {
-            if !self.mark_pending(announcement.block_hash.clone()).await {
+        if self.chain_store.get_block(&tip.block_hash).await.is_none() {
+            if !self.mark_pending(tip.block_hash.clone()).await {
                 tracing::debug!(
-                    block_hash = %announcement.block_hash,
-                    height = announcement.height,
+                    block_hash = %tip.block_hash,
+                    height = tip.height,
                     "block sync request already pending",
                 );
                 return Ok(());
@@ -100,34 +84,34 @@ where
 
             if let Err(error) = self
                 .network
-                .request_block(peer_id.clone(), announcement.block_hash.clone())
+                .request_block(peer_id.clone(), tip.block_hash.clone())
                 .await
             {
                 if let Err(report_error) = self
                     .peer_reputation
                     .report_bad_peer(
                         peer_id,
-                        format!("failed to request announced block: {error}"),
+                        format!("failed to request advertised chain tip: {error}"),
                     )
                     .await
                 {
                     tracing::warn!(?report_error, "failed to report block request failure");
                 }
-                self.clear_pending(&announcement.block_hash).await;
+                self.clear_pending(&tip.block_hash).await;
                 return Err(error);
             }
             tracing::info!(
                 %peer_id,
-                block_hash = %announcement.block_hash,
-                height = announcement.height,
+                block_hash = %tip.block_hash,
+                height = tip.height,
                 "block sync requested",
             );
         } else if let Err(error) = self
             .peer_reputation
-            .report_good_peer(peer_id, "announced already-known block".to_string())
+            .report_good_peer(peer_id, "advertised already-known chain tip".to_string())
             .await
         {
-            tracing::warn!(?error, "failed to report already-known block announcement");
+            tracing::warn!(?error, "failed to report already-known chain tip");
         }
 
         Ok(())
@@ -260,12 +244,8 @@ where
     C: BlockStorePort,
     R: PeerReputationPort,
 {
-    async fn on_block_announcement(
-        &self,
-        peer_id: PeerId,
-        announcement: BlockAnnouncement,
-    ) -> anyhow::Result<()> {
-        self.on_block_announcement(peer_id, announcement).await
+    async fn on_chain_tip(&self, peer_id: PeerId, tip: ChainTip) -> anyhow::Result<()> {
+        self.on_chain_tip(peer_id, tip).await
     }
 
     async fn on_block_received(&self, block_hash: &BlockHash) -> anyhow::Result<()> {
@@ -319,8 +299,8 @@ mod tests {
         }
     }
 
-    fn announcement(hash: u8) -> BlockAnnouncement {
-        BlockAnnouncement {
+    fn chain_tip(hash: u8) -> ChainTip {
+        ChainTip {
             block_hash: BlockHash::from_u8(hash),
             height: 1,
         }
@@ -349,7 +329,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn requests_missing_announced_block() -> anyhow::Result<()> {
+    async fn requests_missing_advertised_tip() -> anyhow::Result<()> {
         let (request_tx, mut request_rx) = mpsc::channel(4);
         let sync = SyncService::new(
             RecordingNetwork { request_tx },
@@ -357,7 +337,7 @@ mod tests {
             RecordingReputation::default(),
         );
 
-        sync.on_block_announcement(PeerId::from("peer-a"), announcement(1))
+        sync.on_chain_tip(PeerId::from("peer-a"), chain_tip(1))
             .await?;
 
         assert!(matches!(
@@ -369,7 +349,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn skips_known_announced_block() -> anyhow::Result<()> {
+    async fn skips_known_advertised_tip() -> anyhow::Result<()> {
         let (request_tx, mut request_rx) = mpsc::channel(4);
         let store = ChainStore::new();
         store.insert(block(1)).await?;
@@ -379,7 +359,7 @@ mod tests {
             RecordingReputation::default(),
         );
 
-        sync.on_block_announcement(PeerId::from("peer-a"), announcement(1))
+        sync.on_chain_tip(PeerId::from("peer-a"), chain_tip(1))
             .await?;
 
         assert!(request_rx.try_recv().is_err());
@@ -387,7 +367,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn skips_duplicate_pending_announced_block() -> anyhow::Result<()> {
+    async fn skips_duplicate_pending_advertised_tip() -> anyhow::Result<()> {
         let (request_tx, mut request_rx) = mpsc::channel(4);
         let sync = SyncService::new(
             RecordingNetwork { request_tx },
@@ -395,9 +375,9 @@ mod tests {
             RecordingReputation::default(),
         );
 
-        sync.on_block_announcement(PeerId::from("peer-a"), announcement(1))
+        sync.on_chain_tip(PeerId::from("peer-a"), chain_tip(1))
             .await?;
-        sync.on_block_announcement(PeerId::from("peer-a"), announcement(1))
+        sync.on_chain_tip(PeerId::from("peer-a"), chain_tip(1))
             .await?;
 
         assert!(request_rx.recv().await.is_some());
@@ -414,10 +394,10 @@ mod tests {
             RecordingReputation::default(),
         );
 
-        sync.on_block_announcement(PeerId::from("peer-a"), announcement(1))
+        sync.on_chain_tip(PeerId::from("peer-a"), chain_tip(1))
             .await?;
         sync.on_block_received(&BlockHash::from_u8(1)).await?;
-        sync.on_block_announcement(PeerId::from("peer-a"), announcement(1))
+        sync.on_chain_tip(PeerId::from("peer-a"), chain_tip(1))
             .await?;
 
         assert!(request_rx.recv().await.is_some());
@@ -435,10 +415,10 @@ mod tests {
         );
         let hash = BlockHash::from_u8(1);
 
-        sync.on_block_announcement(PeerId::from("peer-a"), announcement(1))
+        sync.on_chain_tip(PeerId::from("peer-a"), chain_tip(1))
             .await?;
         sync.on_block_request_failed(&hash).await?;
-        sync.on_block_announcement(PeerId::from("peer-b"), announcement(1))
+        sync.on_chain_tip(PeerId::from("peer-b"), chain_tip(1))
             .await?;
 
         assert!(request_rx.recv().await.is_some());
@@ -456,10 +436,10 @@ mod tests {
         );
         let hash = BlockHash::from_u8(1);
 
-        sync.on_block_announcement(PeerId::from("peer-a"), announcement(1))
+        sync.on_chain_tip(PeerId::from("peer-a"), chain_tip(1))
             .await?;
         sync.on_block_request_failed(&hash).await?;
-        sync.on_block_announcement(PeerId::from("peer-b"), announcement(1))
+        sync.on_chain_tip(PeerId::from("peer-b"), chain_tip(1))
             .await?;
 
         assert!(request_rx.recv().await.is_some());
@@ -482,7 +462,7 @@ mod tests {
             .lock()
             .await
             .insert(hash, tokio::time::Instant::now() - PENDING_BLOCK_TIMEOUT);
-        sync.on_block_announcement(PeerId::from("peer-a"), announcement(1))
+        sync.on_chain_tip(PeerId::from("peer-a"), chain_tip(1))
             .await?;
 
         assert!(request_rx.recv().await.is_some());

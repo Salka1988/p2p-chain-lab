@@ -234,6 +234,25 @@ where
                 Ok(Vec::new())
             }
             ConsensusEvent::BlockReceived { peer_id, block } => {
+                if let Err(error) = self.validate_block_candidate(&block) {
+                    return Ok(vec![ConsensusCommand::ReportBadPeer {
+                        peer_id,
+                        reason: format!("invalid block: {error}"),
+                    }]);
+                }
+
+                if self.chain_store.get_block(&block.hash).await.is_some() {
+                    return Ok(vec![
+                        // Keep the event-loop result idempotently successful so sync state is
+                        // cleared instead of trying to fetch the block's parent again.
+                        ConsensusCommand::StoreBlock(block),
+                        ConsensusCommand::ReportGoodPeer {
+                            peer_id,
+                            reason: "already-known valid block received".to_string(),
+                        },
+                    ]);
+                }
+
                 match self.validate_received_block(&block).await {
                     Ok(()) => {
                         self.observe_valid_block(&block).await;
@@ -399,6 +418,27 @@ mod tests {
             ConsensusCommand::StoreBlock(block_a),
             ConsensusCommand::BroadcastBlock(block_b),
         ] if block_a == block_b && block_a.height == 1 && block_a.parent_hash == Some(parent.hash)));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn duplicate_valid_block_is_idempotent() -> anyhow::Result<()> {
+        let store = ChainStore::new();
+        let consensus = SimpleConsensus::new("node-a", store.clone());
+        let block = signed_block("node-a", None, 0);
+        store.insert(block.clone()).await?;
+
+        let commands = consensus
+            .handle_event(ConsensusEvent::BlockReceived {
+                peer_id: PeerId::from("peer-a"),
+                block: block.clone(),
+            })
+            .await?;
+
+        assert!(matches!(commands.as_slice(), [
+            ConsensusCommand::StoreBlock(stored),
+            ConsensusCommand::ReportGoodPeer { .. },
+        ] if stored == &block));
         Ok(())
     }
 
