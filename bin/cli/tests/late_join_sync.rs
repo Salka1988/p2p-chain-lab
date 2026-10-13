@@ -68,7 +68,7 @@ fn start_node(
         .arg(directory.join("network.toml"))
         .args(["--listen", "/ip4/127.0.0.1/tcp/0", "--node-key-seed", name])
         .arg("--chain-path")
-        .arg(directory.join(format!("{name}.bin")))
+        .arg(directory.join(format!("{name}-data")))
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
@@ -113,7 +113,7 @@ async fn wait_for_tip(path: &Path, minimum: u64, nodes: &mut Nodes) -> anyhow::R
     let deadline = Instant::now() + Duration::from_secs(45);
     loop {
         nodes.check_alive()?;
-        if let Some(tip) = ChainStore::open(path)?.tip().await
+        if let Some(tip) = ChainStore::open(path).await?.tip().await
             && tip.height >= minimum
         {
             return Ok(tip);
@@ -189,15 +189,16 @@ async fn late_joiner_downloads_history_and_follows_new_blocks() -> anyhow::Resul
         nodes.check_alive()?;
     }
     for i in 1..=5 {
-        let store = ChainStore::open(directory.join(format!("node-{i}.bin")))?;
+        let store = ChainStore::open(directory.join(format!("node-{i}-data"))).await?;
         ensure!(
             store.get(&genesis.hash).await == Some(genesis.clone()),
             "node-{i} did not initialize the shared genesis"
         );
     }
     println!("All five validators share genesis {}", genesis.hash);
-    let source_path = directory.join("node-1.bin");
-    let before = ChainStore::open(&source_path)?
+    let source_path = directory.join("node-1-data");
+    let before = ChainStore::open(&source_path)
+        .await?
         .tip()
         .await
         .context("network produced no blocks")?;
@@ -205,7 +206,7 @@ async fn late_joiner_downloads_history_and_follows_new_blocks() -> anyhow::Resul
         before.height >= 5,
         "network did not complete a validator rotation"
     );
-    let late_path = directory.join("late-observer.bin");
+    let late_path = directory.join("late-observer-data");
     ensure!(
         !late_path.exists(),
         "late joiner must start without a chain"
@@ -225,7 +226,7 @@ async fn late_joiner_downloads_history_and_follows_new_blocks() -> anyhow::Resul
     )?;
     wait_for_tip(&late_path, 0, &mut nodes).await?;
     ensure!(
-        ChainStore::open(&late_path)?.get(&genesis.hash).await == Some(genesis.clone()),
+        ChainStore::open(&late_path).await?.get(&genesis.hash).await == Some(genesis.clone()),
         "late observer did not initialize the shared genesis"
     );
     println!(
@@ -233,8 +234,8 @@ async fn late_joiner_downloads_history_and_follows_new_blocks() -> anyhow::Resul
         before.height
     );
     wait_for_tip(&late_path, before.height, &mut nodes).await?;
-    let late = ChainStore::open(&late_path)?;
-    let source = ChainStore::open(&source_path)?;
+    let late = ChainStore::open(&late_path).await?;
+    let source = ChainStore::open(&source_path).await?;
     let mut block = before.clone();
     loop {
         ensure!(
@@ -259,7 +260,8 @@ async fn late_joiner_downloads_history_and_follows_new_blocks() -> anyhow::Resul
         "Historical sync verified through height {} (including genesis)",
         before.height
     );
-    let caught_up = ChainStore::open(&late_path)?
+    let caught_up = ChainStore::open(&late_path)
+        .await?
         .tip()
         .await
         .context("missing synced tip")?;
@@ -273,10 +275,10 @@ async fn late_joiner_downloads_history_and_follows_new_blocks() -> anyhow::Resul
         "node-5",
         "late-observer",
     ] {
-        let path = directory.join(format!("{name}.bin"));
+        let path = directory.join(format!("{name}-data"));
         wait_for_tip(&path, future.height, &mut nodes).await?;
         ensure!(
-            ChainStore::open(path)?.get(&future.hash).await == Some(future.clone()),
+            ChainStore::open(path).await?.get(&future.hash).await == Some(future.clone()),
             "{name} disagrees at height {}",
             future.height
         );

@@ -474,33 +474,45 @@ mod tests {
                 .as_nanos()
         ));
         let validators = vec![validator_id_from_seed("a")];
-        SimpleConsensus::with_genesis("a", ChainStore::open(&path)?, "dev", validators.clone())
-            .await?;
-        let bytes = std::fs::read(&path)?;
+        SimpleConsensus::with_genesis(
+            "a",
+            ChainStore::open(&path).await?,
+            "dev",
+            validators.clone(),
+        )
+        .await?;
+        let genesis = ChainStore::open(&path).await?.tip().await.unwrap();
+        let genesis_path = path.join(format!("{}.block", genesis.hash));
+        let bytes = std::fs::read(&genesis_path)?;
         SimpleConsensus::with_genesis(
             "observer",
-            ChainStore::open(&path)?,
+            ChainStore::open(&path).await?,
             "dev",
             validators.clone(),
         )
         .await?;
         assert!(
-            SimpleConsensus::with_genesis("a", ChainStore::open(&path)?, "different", validators)
-                .await
-                .is_err()
+            SimpleConsensus::with_genesis(
+                "a",
+                ChainStore::open(&path).await?,
+                "different",
+                validators
+            )
+            .await
+            .is_err()
         );
         assert!(
             SimpleConsensus::with_genesis(
                 "a",
-                ChainStore::open(&path)?,
+                ChainStore::open(&path).await?,
                 "dev",
                 vec![validator_id_from_seed("b")]
             )
             .await
             .is_err()
         );
-        assert_eq!(std::fs::read(&path)?, bytes);
-        std::fs::remove_file(path)?;
+        assert_eq!(std::fs::read(&genesis_path)?, bytes);
+        std::fs::remove_dir_all(path)?;
         Ok(())
     }
 
@@ -531,7 +543,7 @@ mod tests {
         ));
         std::fs::create_dir(&directory)?;
         let path = directory.join("chain.bin");
-        let store = ChainStore::open(&path)?;
+        let store = ChainStore::open(&path).await?;
         let consensus = SimpleConsensus::with_genesis(
             "node-a",
             store.clone(),
@@ -542,7 +554,8 @@ mod tests {
 
         for received in [false, true] {
             let previous_tip = store.tip().await.unwrap();
-            let previous_bytes = std::fs::read(&path)?;
+            let previous_path = path.join(format!("{}.block", previous_tip.hash));
+            let previous_bytes = std::fs::read(&previous_path)?;
             let decision = consensus.handle_event(ConsensusEvent::Tick).await?;
             let ConsensusCommand::StoreBlock(candidate) = &decision.commands[0] else {
                 panic!("expected proposed block");
@@ -557,7 +570,7 @@ mod tests {
                 ConsensusEvent::Tick
             };
             // A directory at the temporary-file path forces a real write failure.
-            std::fs::create_dir(path.with_extension("tmp"))?;
+            std::fs::create_dir(path.join(format!("{}.tmp", candidate.hash)))?;
             let decision = consensus.handle_event(event.clone()).await?;
             let ConsensusCommand::StoreBlock(block) = &decision.commands[0] else {
                 panic!("expected store command");
@@ -565,10 +578,13 @@ mod tests {
             assert!(store.insert(block.clone()).await.is_err());
             assert_eq!(store.tip().await, Some(previous_tip.clone()));
             assert!(store.get(&candidate.hash).await.is_none());
-            assert_eq!(std::fs::read(&path)?, previous_bytes);
-            assert_eq!(ChainStore::open(&path)?.tip().await, Some(previous_tip));
+            assert_eq!(std::fs::read(&previous_path)?, previous_bytes);
+            assert_eq!(
+                ChainStore::open(&path).await?.tip().await,
+                Some(previous_tip)
+            );
 
-            std::fs::remove_dir(path.with_extension("tmp"))?;
+            std::fs::remove_dir(path.join(format!("{}.tmp", candidate.hash)))?;
             let retry = consensus.handle_event(event).await?;
             let ConsensusCommand::StoreBlock(block) = &retry.commands[0] else {
                 panic!("retry must still accept the same block");
@@ -577,7 +593,7 @@ mod tests {
             assert!(store.insert(block.clone()).await?);
             assert!(!store.insert(block.clone()).await?);
             assert_eq!(
-                ChainStore::open(&path)?.tip().await,
+                ChainStore::open(&path).await?.tip().await,
                 Some(candidate.clone())
             );
             let next = consensus.handle_event(ConsensusEvent::Tick).await?;
@@ -588,7 +604,7 @@ mod tests {
                         && block.parent_hash == Some(candidate.hash.clone())
             ));
         }
-        std::fs::remove_file(path)?;
+        std::fs::remove_dir_all(path)?;
         std::fs::remove_dir(directory)?;
         Ok(())
     }

@@ -16,6 +16,4 @@ tokio-util.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]
-async-trait.workspace = true
-p2p-chain-lib-network = { path = "../network" }
 p2p-chain-lib-storage = { path = "../storage" }

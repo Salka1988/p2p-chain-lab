@@ -6,7 +6,7 @@ use p2p_chain_lib_consensus::{
     ConsensusCommand, ConsensusEvent, ConsensusOutcome, SimpleConsensus,
 };
 use p2p_chain_lib_mempool::Mempool;
-use p2p_chain_lib_ports::{BlockNetworkPort, BlockRequestPort, NetworkEvent, PeerReputationPort};
+use p2p_chain_lib_ports::{NetworkEvent, NetworkHandle, PeerReputationHandle};
 use p2p_chain_lib_protocol::{messages::ChainTip, validation::validate_transaction};
 use p2p_chain_lib_sync::SyncService;
 use tokio::{sync::mpsc, task::JoinSet};
@@ -17,16 +17,12 @@ pub struct Node {
 }
 
 pub struct NodeRuntime {
-    pub network: Arc<dyn BlockNetworkPort>,
+    pub network: NetworkHandle,
     pub chain_store: Arc<dyn BlockStorePort>,
     pub mempool: Mempool,
     pub consensus: SimpleConsensus<Arc<dyn BlockStorePort>>,
-    pub sync: SyncService<
-        Arc<dyn BlockNetworkPort>,
-        Arc<dyn BlockStorePort>,
-        Arc<dyn PeerReputationPort>,
-    >,
-    pub peer_reputation: Arc<dyn PeerReputationPort>,
+    pub sync: SyncService,
+    pub peer_reputation: PeerReputationHandle,
     pub network_event_rx: mpsc::Receiver<NetworkEvent>,
     pub block_production_interval: Option<Duration>,
 }
@@ -256,8 +252,8 @@ impl Node {
 
     async fn handle_consensus_event(
         chain_store: &Arc<dyn BlockStorePort>,
-        network: &Arc<dyn BlockNetworkPort>,
-        peer_reputation: &Arc<dyn PeerReputationPort>,
+        network: &NetworkHandle,
+        peer_reputation: &PeerReputationHandle,
         consensus: &SimpleConsensus<Arc<dyn BlockStorePort>>,
         event: ConsensusEvent,
     ) -> anyhow::Result<ConsensusOutcome> {
@@ -308,53 +304,17 @@ impl Node {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use async_trait::async_trait;
-    use p2p_chain_lib_chain::block::{Block, BlockHash};
+    use p2p_chain_lib_chain::block::BlockHash;
     use p2p_chain_lib_consensus::ConsensusCommand;
-    use p2p_chain_lib_network::{
-        PeerAddress,
-        peer_score::{PeerScoreCommand, PeerScoreHandle},
-        service::{NetworkConfig, NetworkService},
-    };
-    use p2p_chain_lib_ports::PeerId;
+    use p2p_chain_lib_ports::{NetworkCommand, PeerId, PeerScoreCommand};
     use p2p_chain_lib_storage::ChainStore;
     use tokio::{sync::mpsc, time::timeout};
 
-    struct RecordingNetwork(mpsc::Sender<(PeerId, BlockHash, Option<Block>)>);
-
-    #[async_trait]
-    impl BlockRequestPort for RecordingNetwork {
-        async fn request_block(&self, _: PeerId, _: BlockHash) -> anyhow::Result<()> {
-            anyhow::bail!("unexpected block request")
-        }
-    }
-
-    #[async_trait]
-    impl BlockNetworkPort for RecordingNetwork {
-        async fn broadcast_block(&self, _: Block) -> anyhow::Result<()> {
-            anyhow::bail!("unexpected broadcast")
-        }
-
-        async fn broadcast_chain_tip(&self, _: ChainTip) -> anyhow::Result<()> {
-            anyhow::bail!("unexpected tip broadcast")
-        }
-
-        async fn send_block(&self, peer: PeerId, block: Block) -> anyhow::Result<()> {
-            self.0.send((peer, block.hash.clone(), Some(block))).await?;
-            Ok(())
-        }
-
-        async fn send_block_not_found(&self, peer: PeerId, hash: BlockHash) -> anyhow::Result<()> {
-            self.0.send((peer, hash, None)).await?;
-            Ok(())
-        }
-    }
-
     #[tokio::test]
     async fn serves_known_and_missing_blocks_through_the_network_port() -> anyhow::Result<()> {
-        let (mut node, service) = lifecycle_node()?;
+        let (mut node, service) = lifecycle_node();
         let (responses_tx, mut responses_rx) = mpsc::channel(2);
-        let network: Arc<dyn BlockNetworkPort> = Arc::new(RecordingNetwork(responses_tx));
+        let network = NetworkHandle::new(responses_tx);
         node.runtime.network = network.clone();
         node.runtime.sync = SyncService::new(
             network,
@@ -397,32 +357,31 @@ mod tests {
         token.cancel();
         task.await??;
         let (found, absent) = responses?;
-        assert_eq!(found, Some((peer.clone(), block.hash.clone(), Some(block))));
-        assert_eq!(absent, Some((peer, missing, None)));
+        assert_eq!(
+            found,
+            Some(NetworkCommand::SendBlock {
+                peer_id: peer.clone(),
+                block_hash: block.hash.clone(),
+                block: Some(block)
+            })
+        );
+        assert_eq!(
+            absent,
+            Some(NetworkCommand::SendBlock {
+                peer_id: peer,
+                block_hash: missing,
+                block: None
+            })
+        );
         Ok(())
     }
 
-    fn lifecycle_node() -> anyhow::Result<(Node, NetworkService)> {
+    fn lifecycle_node() -> (Node, mpsc::Sender<NetworkEvent>) {
         let (event_tx, event_rx) = mpsc::channel(8);
         let (score_tx, _score_rx) = mpsc::channel(8);
-        let (_score_event_tx, score_event_rx) = mpsc::channel(8);
-        let reputation = PeerScoreHandle::new(score_tx);
-        let (service, network) = NetworkService::new(
-            NetworkConfig {
-                listen_addr: PeerAddress::from("/ip4/127.0.0.1/tcp/0"),
-                bootstrap_peers: Vec::new(),
-                node_key_seed: Some("lifecycle-test".into()),
-                validator_id: None,
-                validators: Vec::new(),
-                max_gossip_events_per_second: 64,
-                max_block_requests_per_second: 16,
-            },
-            event_tx,
-            reputation.clone(),
-            score_event_rx,
-        )?;
-        let network: Arc<dyn BlockNetworkPort> = Arc::new(network);
-        let reputation: Arc<dyn PeerReputationPort> = Arc::new(reputation);
+        let reputation = PeerReputationHandle::new(score_tx);
+        let (command_tx, _command_rx) = mpsc::channel(8);
+        let network = NetworkHandle::new(command_tx);
         let store: Arc<dyn BlockStorePort> = Arc::new(ChainStore::new());
         let node = Node::new(NodeRuntime {
             network: network.clone(),
@@ -434,12 +393,12 @@ mod tests {
             network_event_rx: event_rx,
             block_production_interval: None,
         });
-        Ok((node, service))
+        (node, event_tx)
     }
 
     #[test]
     fn construction_does_not_require_a_tokio_runtime() -> anyhow::Result<()> {
-        let (node, service) = lifecycle_node()?;
+        let (node, service) = lifecycle_node();
         drop(node);
         drop(service);
         Ok(())
@@ -447,7 +406,7 @@ mod tests {
 
     #[tokio::test]
     async fn reports_closed_event_stream_without_waiting_for_cancellation() -> anyhow::Result<()> {
-        let (node, service) = lifecycle_node()?;
+        let (node, service) = lifecycle_node();
         drop(service);
         let token = CancellationToken::new();
         let error = timeout(Duration::from_secs(1), node.run(token.clone()))
@@ -460,7 +419,7 @@ mod tests {
 
     #[tokio::test]
     async fn run_token_stops_the_event_loop() -> anyhow::Result<()> {
-        let (node, _service) = lifecycle_node()?;
+        let (node, _service) = lifecycle_node();
         let token = CancellationToken::new();
         let mut running = Box::pin(node.run(token.clone()));
         assert!(
@@ -475,7 +434,7 @@ mod tests {
 
     #[tokio::test]
     async fn event_loop_panic_reaches_the_supervising_task() -> anyhow::Result<()> {
-        let (mut node, _service) = lifecycle_node()?;
+        let (mut node, _service) = lifecycle_node();
         // Bypass CLI validation to trigger the timer's zero-interval panic.
         node.runtime.block_production_interval = Some(Duration::ZERO);
         let task = tokio::spawn(node.run(CancellationToken::new()));
@@ -507,24 +466,9 @@ mod tests {
 
         let (network_event_tx, network_event_rx) = mpsc::channel(8);
         let (peer_score_command_tx, mut peer_score_command_rx) = mpsc::channel(64);
-        let (_peer_score_event_tx, peer_score_event_rx) = mpsc::channel(8);
-        let peer_score = PeerScoreHandle::new(peer_score_command_tx);
-        let (_network_service, network) = NetworkService::new(
-            NetworkConfig {
-                listen_addr: PeerAddress::from("/ip4/127.0.0.1/tcp/0"),
-                bootstrap_peers: Vec::new(),
-                node_key_seed: Some("node-a".to_string()),
-                validator_id: None,
-                validators: Vec::new(),
-                max_gossip_events_per_second: 64,
-                max_block_requests_per_second: 16,
-            },
-            network_event_tx.clone(),
-            peer_score.clone(),
-            peer_score_event_rx,
-        )?;
-        let network: Arc<dyn BlockNetworkPort> = Arc::new(network);
-        let peer_score: Arc<dyn PeerReputationPort> = Arc::new(peer_score);
+        let peer_score = PeerReputationHandle::new(peer_score_command_tx);
+        let (command_tx, _command_rx) = mpsc::channel(64);
+        let network = NetworkHandle::new(command_tx);
         let chain_store: Arc<dyn BlockStorePort> = Arc::new(ChainStore::new());
         let cancellation_token = CancellationToken::new();
         let node = Node::new(NodeRuntime {

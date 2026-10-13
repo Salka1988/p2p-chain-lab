@@ -22,7 +22,7 @@ impl Default for Config {
             listen_addr: PeerAddress::from(DEFAULT_LISTEN_ADDR),
             bootstrap_peers: Vec::new(),
             node_key_seed: None,
-            chain_path: PathBuf::from("chain.bin"),
+            chain_path: PathBuf::from("chain-data"),
             block_production_interval: None,
             genesis: GenesisConfig::default(),
             max_gossip_events_per_second: 64,

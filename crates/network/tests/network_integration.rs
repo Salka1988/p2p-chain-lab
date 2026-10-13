@@ -1,14 +1,13 @@
-use std::{future::Future, time::Duration};
+use std::{future::Future, sync::Arc, time::Duration};
 
-use async_trait::async_trait;
 use libp2p::{Multiaddr, identity::Keypair};
 use p2p_chain_lib_chain::block::{Block, BlockHash};
 use p2p_chain_lib_network::{
     PeerAddress, PeerId,
-    peer_score::{PeerScoreActor, PeerScoreHandle},
-    service::{NetworkConfig, NetworkHandle, NetworkService},
+    peer_score::PeerScoreActor,
+    service::{NetworkConfig, NetworkService},
 };
-use p2p_chain_lib_ports::{NetworkEvent, PeerReputationPort};
+use p2p_chain_lib_ports::{NetworkEvent, NetworkHandle, PeerReputationHandle};
 use p2p_chain_lib_protocol::messages::{ChainTip, Transaction, TransactionId};
 use p2p_chain_lib_storage::ChainStore;
 use p2p_chain_lib_sync::SyncService;
@@ -21,20 +20,6 @@ use tokio::{
 use tokio_util::sync::CancellationToken;
 
 const TEST_TIMEOUT: Duration = Duration::from_secs(10);
-
-#[derive(Clone)]
-struct NoopReputation;
-
-#[async_trait]
-impl PeerReputationPort for NoopReputation {
-    async fn report_good_peer(&self, _peer_id: PeerId, _reason: String) -> anyhow::Result<()> {
-        Ok(())
-    }
-
-    async fn report_bad_peer(&self, _peer_id: PeerId, _reason: String) -> anyhow::Result<()> {
-        Ok(())
-    }
-}
 
 struct TestNetwork {
     handle: NetworkHandle,
@@ -58,7 +43,7 @@ impl TestNetwork {
         let (event_tx, event_rx) = mpsc::channel(64);
         let (peer_score_command_tx, peer_score_command_rx) = mpsc::channel(64);
         let (peer_score_event_tx, peer_score_event_rx) = mpsc::channel(64);
-        let peer_score = PeerScoreHandle::new(peer_score_command_tx);
+        let peer_score = PeerReputationHandle::new(peer_score_command_tx);
         let cancellation_token = CancellationToken::new();
 
         let peer_score_task = {
@@ -419,7 +404,12 @@ async fn late_joiner_requests_an_advertised_chain_tip() -> anyhow::Result<()> {
     assert_eq!(tip_peer_id, first_peer_id);
     assert_eq!(received_tip, tip);
 
-    let sync = SyncService::new(second.handle.clone(), ChainStore::new(), NoopReputation);
+    let (score_tx, _score_rx) = mpsc::channel(8);
+    let sync = SyncService::new(
+        second.handle.clone(),
+        Arc::new(ChainStore::new()),
+        PeerReputationHandle::new(score_tx),
+    );
     sync.on_chain_tip(tip_peer_id, received_tip).await?;
     let mut workers = tokio::task::JoinSet::new();
     workers.spawn(async move { sync.run_requests().await });

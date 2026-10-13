@@ -11,6 +11,7 @@
 *.err
 /test-ledger/
 /chain.bin
+/chain-data/
 
 # Markdown docs
 *.md

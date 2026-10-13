@@ -48,6 +48,7 @@ struct Cli {
     node_key_seed: Option<String>,
 
     #[arg(long, value_parser = NonEmptyStringValueParser::new())]
+    /// Block storage directory (one committed file per block).
     chain_path: Option<String>,
 
     #[arg(
@@ -306,7 +307,7 @@ mod tests {
             file.path(),
             r#"
 listen = "/ip4/127.0.0.1/tcp/4001"
-chain_path = "from-file.bin"
+chain_path = "from-file-data"
 bootstrap = ["file-peer"]
 validator = ["file-validator"]
 produce_block_interval_ms = 100
@@ -336,7 +337,7 @@ max_gossip_events_per_second = 70
         );
         assert_eq!(config.max_gossip_events_per_second, 80);
         assert_eq!(config.max_block_requests_per_second, 22);
-        assert_eq!(config.chain_path, PathBuf::from("from-file.bin"));
+        assert_eq!(config.chain_path, PathBuf::from("from-file-data"));
         let config = Cli::try_parse_from([
             "node",
             "--config",
@@ -420,7 +421,7 @@ max_gossip_events_per_second = 70
             "--bootstrap=/ip4/127.0.0.1/tcp/4002",
             "--bootstrap=/ip4/127.0.0.1/tcp/4003",
             "--node-key-seed=node-a",
-            "--chain-path=/tmp/chain.bin",
+            "--chain-path=/tmp/chain-data",
             "--validator=node-a",
             "--validator=node-b",
             "--produce-block-interval-ms=250",
@@ -441,7 +442,7 @@ max_gossip_events_per_second = 70
         assert_eq!(config.node_key_seed.as_deref(), Some("node-a"));
         assert_eq!(
             config.chain_path,
-            std::path::PathBuf::from("/tmp/chain.bin")
+            std::path::PathBuf::from("/tmp/chain-data")
         );
         assert_eq!(config.genesis.validators, vec!["node-a", "node-b"]);
         assert_eq!(

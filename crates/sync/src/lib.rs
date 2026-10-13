@@ -6,7 +6,7 @@ use std::{
 
 use p2p_chain_lib_chain::block::{Block, BlockHash};
 use p2p_chain_lib_chain::store::BlockStorePort;
-use p2p_chain_lib_ports::{BlockRequestPort, PeerId, PeerReputationPort};
+use p2p_chain_lib_ports::{NetworkHandle, PeerId, PeerReputationHandle};
 use p2p_chain_lib_protocol::{
     messages::ChainTip,
     validation::{validate_block, validate_chain_tip},
@@ -23,11 +23,11 @@ const MAX_TIP_REQUESTS: usize = 64;
 const MAX_ORPHAN_BLOCKS: usize = 1024;
 const MAX_ORPHAN_BLOCK_BYTES: usize = 16 * 1024 * 1024;
 
-#[derive(Debug, Clone)]
-pub struct SyncService<N, C, R> {
-    network: N,
-    chain_store: C,
-    peer_reputation: R,
+#[derive(Clone)]
+pub struct SyncService {
+    network: NetworkHandle,
+    chain_store: Arc<dyn BlockStorePort>,
+    peer_reputation: PeerReputationHandle,
     pending_blocks: Arc<Mutex<HashMap<BlockHash, PendingRequest>>>,
     orphan_blocks: Arc<Mutex<OrphanBlocks>>,
     request_worker: Arc<Mutex<()>>,
@@ -50,13 +50,12 @@ struct OrphanBlocks {
     total_bytes: usize,
 }
 
-impl<N, C, R> SyncService<N, C, R>
-where
-    N: BlockRequestPort,
-    C: BlockStorePort,
-    R: PeerReputationPort,
-{
-    pub fn new(network: N, chain_store: C, peer_reputation: R) -> Self {
+impl SyncService {
+    pub fn new(
+        network: NetworkHandle,
+        chain_store: Arc<dyn BlockStorePort>,
+        peer_reputation: PeerReputationHandle,
+    ) -> Self {
         Self {
             network,
             chain_store,
@@ -342,46 +341,25 @@ fn block_size(block: &Block) -> usize {
 mod tests {
     use std::sync::Arc;
 
-    use async_trait::async_trait;
     use tokio::sync::mpsc;
 
     use super::*;
     use p2p_chain_lib_chain::block::{Block, BlockHash};
-    use p2p_chain_lib_ports::PeerId;
+    use p2p_chain_lib_ports::{NetworkCommand, PeerId};
     use p2p_chain_lib_storage::ChainStore;
 
-    #[derive(Clone)]
-    struct RecordingNetwork {
-        request_tx: mpsc::Sender<(PeerId, BlockHash)>,
+    fn reputation() -> PeerReputationHandle {
+        let (tx, _rx) = mpsc::channel(8);
+        PeerReputationHandle::new(tx)
     }
 
-    #[async_trait]
-    impl BlockRequestPort for RecordingNetwork {
-        async fn request_block(
-            &self,
-            peer_id: PeerId,
-            block_hash: BlockHash,
-        ) -> anyhow::Result<()> {
-            self.request_tx.send((peer_id, block_hash)).await?;
-            Ok(())
-        }
-    }
-
-    #[derive(Clone, Default)]
-    struct RecordingReputation {
-        reports: Arc<tokio::sync::Mutex<Vec<(PeerId, String, bool)>>>,
-    }
-
-    #[async_trait]
-    impl PeerReputationPort for RecordingReputation {
-        async fn report_good_peer(&self, peer_id: PeerId, reason: String) -> anyhow::Result<()> {
-            self.reports.lock().await.push((peer_id, reason, true));
-            Ok(())
-        }
-
-        async fn report_bad_peer(&self, peer_id: PeerId, reason: String) -> anyhow::Result<()> {
-            self.reports.lock().await.push((peer_id, reason, false));
-            Ok(())
+    fn request(command: NetworkCommand) -> (PeerId, BlockHash) {
+        match command {
+            NetworkCommand::RequestBlock {
+                peer_id,
+                block_hash,
+            } => (peer_id, block_hash),
+            other => panic!("unexpected command: {other:?}"),
         }
     }
 
@@ -422,9 +400,9 @@ mod tests {
         };
         let (request_tx, mut request_rx) = mpsc::channel(4);
         let sync = SyncService::new(
-            RecordingNetwork { request_tx },
-            ChainStore::new(),
-            RecordingReputation::default(),
+            NetworkHandle::new(request_tx),
+            Arc::new(ChainStore::new()),
+            reputation(),
         );
         let polls = Arc::new(AtomicUsize::new(0));
         let worker_polls = polls.clone();
@@ -446,7 +424,10 @@ mod tests {
         assert_eq!(polls.load(Ordering::SeqCst), idle_polls);
         sync.on_chain_tip(PeerId::from("peer-a"), chain_tip(1))
             .await?;
-        assert_eq!(request_rx.recv().await.unwrap().1, BlockHash::from_u8(1));
+        assert_eq!(
+            request_rx.recv().await.map(request).unwrap().1,
+            BlockHash::from_u8(1)
+        );
         tokio::time::advance(PENDING_BLOCK_TIMEOUT).await;
         tokio::task::yield_now().await;
         assert!(sync.pending_blocks.lock().await.is_empty());
@@ -462,9 +443,9 @@ mod tests {
     async fn parent_promotion_wakes_worker_before_tip_deadline() -> anyhow::Result<()> {
         let (request_tx, mut request_rx) = mpsc::channel(4);
         let sync = SyncService::new(
-            RecordingNetwork { request_tx },
-            ChainStore::new(),
-            RecordingReputation::default(),
+            NetworkHandle::new(request_tx),
+            Arc::new(ChainStore::new()),
+            reputation(),
         );
         sync.on_chain_tip(PeerId::from("peer-a"), chain_tip(2))
             .await?;
@@ -476,7 +457,7 @@ mod tests {
         sync.on_unaccepted_block(PeerId::from("peer-b"), child_block(3, 2, 3))
             .await?;
         assert_eq!(
-            request_rx.recv().await.unwrap(),
+            request_rx.recv().await.map(request).unwrap(),
             (PeerId::from("peer-b"), BlockHash::from_u8(2))
         );
         assert!(started.elapsed() < CHAIN_TIP_SYNC_DELAY);
@@ -490,9 +471,9 @@ mod tests {
     async fn paces_tip_and_parent_requests_across_clones() -> anyhow::Result<()> {
         let (request_tx, mut request_rx) = mpsc::channel(4);
         let sync = SyncService::new(
-            RecordingNetwork { request_tx },
-            ChainStore::new(),
-            RecordingReputation::default(),
+            NetworkHandle::new(request_tx),
+            Arc::new(ChainStore::new()),
+            reputation(),
         );
         sync.on_chain_tip(PeerId::from("peer-a"), chain_tip(3))
             .await?;
@@ -500,20 +481,20 @@ mod tests {
         let worker = sync.clone();
         workers.spawn(async move { worker.run_requests().await });
         let started = tokio::time::Instant::now();
-        assert!(request_rx.recv().await.is_some());
+        assert!(request_rx.recv().await.map(request).is_some());
         assert!(started.elapsed() >= CHAIN_TIP_SYNC_DELAY);
         let sent = tokio::time::Instant::now();
         sync.clone()
             .on_unaccepted_block(PeerId::from("peer-a"), child_block(3, 2, 3))
             .await?;
-        assert!(request_rx.recv().await.is_some());
+        assert!(request_rx.recv().await.map(request).is_some());
         assert!(sent.elapsed() >= BLOCK_REQUEST_INTERVAL);
         assert!(sync.run_requests().await.is_err());
         workers.shutdown().await;
         sync.on_chain_tip(PeerId::from("peer-a"), chain_tip(4))
             .await?;
         tokio::time::advance(PENDING_BLOCK_TIMEOUT).await;
-        assert!(request_rx.try_recv().is_err());
+        assert!(request_rx.try_recv().map(request).is_err());
         assert!(sync.request_worker.try_lock().is_ok());
         Ok(())
     }
@@ -522,9 +503,9 @@ mod tests {
     async fn requests_missing_advertised_tip() -> anyhow::Result<()> {
         let (request_tx, mut request_rx) = mpsc::channel(4);
         let sync = SyncService::new(
-            RecordingNetwork { request_tx },
-            ChainStore::new(),
-            RecordingReputation::default(),
+            NetworkHandle::new(request_tx),
+            Arc::new(ChainStore::new()),
+            reputation(),
         );
 
         sync.on_chain_tip(PeerId::from("peer-a"), chain_tip(1))
@@ -533,7 +514,7 @@ mod tests {
         tokio::time::advance(CHAIN_TIP_SYNC_DELAY).await;
         sync.dispatch_request().await;
         assert!(matches!(
-            request_rx.recv().await,
+            request_rx.recv().await.map(request),
             Some((peer_id, block_hash))
                 if peer_id == PeerId::from("peer-a") && block_hash == BlockHash::from_u8(1)
         ));
@@ -546,9 +527,9 @@ mod tests {
         let store = ChainStore::new();
         store.insert(block(1)).await?;
         let sync = SyncService::new(
-            RecordingNetwork { request_tx },
-            store,
-            RecordingReputation::default(),
+            NetworkHandle::new(request_tx),
+            Arc::new(store),
+            reputation(),
         );
 
         sync.on_chain_tip(PeerId::from("peer-a"), chain_tip(1))
@@ -556,7 +537,7 @@ mod tests {
 
         tokio::time::advance(CHAIN_TIP_SYNC_DELAY).await;
         sync.dispatch_request().await;
-        assert!(request_rx.try_recv().is_err());
+        assert!(request_rx.try_recv().map(request).is_err());
         Ok(())
     }
 
@@ -564,9 +545,9 @@ mod tests {
     async fn skips_duplicate_pending_advertised_tip() -> anyhow::Result<()> {
         let (request_tx, mut request_rx) = mpsc::channel(4);
         let sync = SyncService::new(
-            RecordingNetwork { request_tx },
-            ChainStore::new(),
-            RecordingReputation::default(),
+            NetworkHandle::new(request_tx),
+            Arc::new(ChainStore::new()),
+            reputation(),
         );
 
         sync.on_chain_tip(PeerId::from("peer-a"), chain_tip(1))
@@ -577,8 +558,8 @@ mod tests {
         tokio::time::advance(CHAIN_TIP_SYNC_DELAY).await;
         sync.dispatch_request().await;
         sync.dispatch_request().await;
-        assert!(request_rx.recv().await.is_some());
-        assert!(request_rx.try_recv().is_err());
+        assert!(request_rx.recv().await.map(request).is_some());
+        assert!(request_rx.try_recv().map(request).is_err());
         Ok(())
     }
 
@@ -586,9 +567,9 @@ mod tests {
     async fn received_block_clears_pending_request() -> anyhow::Result<()> {
         let (request_tx, mut request_rx) = mpsc::channel(4);
         let sync = SyncService::new(
-            RecordingNetwork { request_tx },
-            ChainStore::new(),
-            RecordingReputation::default(),
+            NetworkHandle::new(request_tx),
+            Arc::new(ChainStore::new()),
+            reputation(),
         );
 
         sync.on_chain_tip(PeerId::from("peer-a"), chain_tip(1))
@@ -596,13 +577,13 @@ mod tests {
         sync.on_block_received(&BlockHash::from_u8(1)).await?;
         tokio::time::advance(CHAIN_TIP_SYNC_DELAY).await;
         sync.dispatch_request().await;
-        assert!(request_rx.try_recv().is_err());
+        assert!(request_rx.try_recv().map(request).is_err());
         sync.on_chain_tip(PeerId::from("peer-a"), chain_tip(1))
             .await?;
 
         tokio::time::advance(CHAIN_TIP_SYNC_DELAY).await;
         sync.dispatch_request().await;
-        assert!(request_rx.recv().await.is_some());
+        assert!(request_rx.recv().await.map(request).is_some());
         Ok(())
     }
 
@@ -610,9 +591,9 @@ mod tests {
     async fn retries_after_request_failure() -> anyhow::Result<()> {
         let (request_tx, mut request_rx) = mpsc::channel(4);
         let sync = SyncService::new(
-            RecordingNetwork { request_tx },
-            ChainStore::new(),
-            RecordingReputation::default(),
+            NetworkHandle::new(request_tx),
+            Arc::new(ChainStore::new()),
+            reputation(),
         );
         let hash = BlockHash::from_u8(1);
 
@@ -626,8 +607,8 @@ mod tests {
 
         tokio::time::advance(CHAIN_TIP_SYNC_DELAY).await;
         sync.dispatch_request().await;
-        assert!(request_rx.recv().await.is_some());
-        assert!(request_rx.recv().await.is_some());
+        assert!(request_rx.recv().await.map(request).is_some());
+        assert!(request_rx.recv().await.map(request).is_some());
         Ok(())
     }
 
@@ -635,9 +616,9 @@ mod tests {
     async fn retries_after_pending_request_times_out() -> anyhow::Result<()> {
         let (request_tx, mut request_rx) = mpsc::channel(4);
         let sync = SyncService::new(
-            RecordingNetwork { request_tx },
-            ChainStore::new(),
-            RecordingReputation::default(),
+            NetworkHandle::new(request_tx),
+            Arc::new(ChainStore::new()),
+            reputation(),
         );
         sync.on_chain_tip(PeerId::from("peer-a"), chain_tip(1))
             .await?;
@@ -645,7 +626,7 @@ mod tests {
             .await?;
         tokio::time::advance(CHAIN_TIP_SYNC_DELAY).await;
         sync.dispatch_request().await;
-        assert!(request_rx.recv().await.is_some());
+        assert!(request_rx.recv().await.map(request).is_some());
         tokio::time::advance(PENDING_BLOCK_TIMEOUT).await;
         sync.dispatch_request().await;
         assert!(sync.pending_blocks.lock().await.is_empty());
@@ -654,7 +635,7 @@ mod tests {
 
         tokio::time::advance(CHAIN_TIP_SYNC_DELAY).await;
         sync.dispatch_request().await;
-        assert!(request_rx.recv().await.is_some());
+        assert!(request_rx.recv().await.map(request).is_some());
         Ok(())
     }
 
@@ -662,9 +643,9 @@ mod tests {
     async fn requests_a_missing_parent_and_releases_its_cached_child() -> anyhow::Result<()> {
         let (request_tx, mut request_rx) = mpsc::channel(4);
         let sync = SyncService::new(
-            RecordingNetwork { request_tx },
-            ChainStore::new(),
-            RecordingReputation::default(),
+            NetworkHandle::new(request_tx),
+            Arc::new(ChainStore::new()),
+            reputation(),
         );
         let child = child_block(2, 1, 2);
 
@@ -673,7 +654,7 @@ mod tests {
 
         sync.dispatch_request().await;
         assert!(matches!(
-            request_rx.recv().await,
+            request_rx.recv().await.map(request),
             Some((peer_id, hash)) if peer_id == PeerId::from("peer-a") && hash == BlockHash::from_u8(1)
         ));
         assert_eq!(
@@ -686,10 +667,11 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn bounds_tip_floods_and_reserves_priority_for_parents() -> anyhow::Result<()> {
         let (request_tx, mut request_rx) = mpsc::channel(4);
-        let reputation = RecordingReputation::default();
+        let (score_tx, score_rx) = mpsc::channel(8);
+        let reputation = PeerReputationHandle::new(score_tx);
         let sync = SyncService::new(
-            RecordingNetwork { request_tx },
-            ChainStore::new(),
+            NetworkHandle::new(request_tx),
+            Arc::new(ChainStore::new()),
             reputation.clone(),
         );
         for hash in 1..201 {
@@ -710,9 +692,9 @@ mod tests {
         assert_eq!(sync.pending_blocks.lock().await.len(), MAX_PENDING_REQUESTS);
         tokio::time::advance(CHAIN_TIP_SYNC_DELAY).await;
         sync.dispatch_request().await;
-        let (peer, _) = request_rx.try_recv()?;
+        let (peer, _) = request_rx.try_recv().map(request)?;
         assert_eq!(peer, PeerId::from("peer-b"));
-        assert!(reputation.reports.lock().await.is_empty());
+        assert!(score_rx.is_empty());
         Ok(())
     }
 
@@ -720,12 +702,16 @@ mod tests {
     async fn stalled_transport_does_not_block_enqueue_or_penalize_peers() -> anyhow::Result<()> {
         let (request_tx, mut request_rx) = mpsc::channel(1);
         request_tx
-            .send((PeerId::from("occupied"), BlockHash::from_u8(0)))
+            .send(NetworkCommand::RequestBlock {
+                peer_id: PeerId::from("occupied"),
+                block_hash: BlockHash::from_u8(0),
+            })
             .await?;
-        let reputation = RecordingReputation::default();
+        let (score_tx, score_rx) = mpsc::channel(8);
+        let reputation = PeerReputationHandle::new(score_tx);
         let sync = SyncService::new(
-            RecordingNetwork { request_tx },
-            ChainStore::new(),
+            NetworkHandle::new(request_tx),
+            Arc::new(ChainStore::new()),
             reputation.clone(),
         );
         // Neither handler waits for a free network slot or the pacing timer.
@@ -743,13 +729,13 @@ mod tests {
                 .await
                 .contains_key(&BlockHash::from_u8(2))
         );
-        assert!(reputation.reports.lock().await.is_empty());
-        request_rx.try_recv()?;
+        assert!(score_rx.is_empty());
+        request_rx.try_recv().map(request)?;
         sync.on_unaccepted_block(PeerId::from("peer-b"), child_block(3, 2, 3))
             .await?;
         sync.dispatch_request().await;
         assert_eq!(
-            request_rx.try_recv()?,
+            request_rx.try_recv().map(request)?,
             (PeerId::from("peer-b"), BlockHash::from_u8(2))
         );
         Ok(())
@@ -760,9 +746,9 @@ mod tests {
     -> anyhow::Result<()> {
         let (request_tx, mut request_rx) = mpsc::channel(4);
         let sync = SyncService::new(
-            RecordingNetwork { request_tx },
-            ChainStore::new(),
-            RecordingReputation::default(),
+            NetworkHandle::new(request_tx),
+            Arc::new(ChainStore::new()),
+            reputation(),
         );
         sync.on_unaccepted_block(PeerId::from("peer-a"), child_block(3, 2, 3))
             .await?;
@@ -772,16 +758,16 @@ mod tests {
             .await?;
         assert_eq!(sync.pending_blocks.lock().await.len(), 1);
         sync.dispatch_request().await;
-        assert_eq!(request_rx.try_recv()?.1, BlockHash::from_u8(1));
+        assert_eq!(request_rx.try_recv().map(request)?.1, BlockHash::from_u8(1));
         tokio::time::advance(PENDING_BLOCK_TIMEOUT).await;
         sync.on_chain_tip(PeerId::from("peer-b"), chain_tip(3))
             .await?;
         sync.dispatch_request().await;
         assert_eq!(
-            request_rx.try_recv()?,
+            request_rx.try_recv().map(request)?,
             (PeerId::from("peer-b"), BlockHash::from_u8(1))
         );
-        assert!(request_rx.try_recv().is_err());
+        assert!(request_rx.try_recv().map(request).is_err());
         Ok(())
     }
 }

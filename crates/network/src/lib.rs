@@ -1,5 +1,4 @@
 mod behaviour;
-mod command;
 pub mod peer_score;
 pub mod service;
 pub(crate) mod validator_directory;

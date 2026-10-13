@@ -13,5 +13,4 @@ tracing.workspace = true
 
 [dev-dependencies]
 p2p-chain-lib-storage = { path = "../storage" }
-async-trait.workspace = true
 tokio = { workspace = true, features = ["test-util"] }

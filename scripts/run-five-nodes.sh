@@ -31,7 +31,7 @@ run_node() {
   RUST_LOG="${RUST_LOG:-info}" "$BIN" \
     --listen "/ip4/127.0.0.1/tcp/${port}" \
     --node-key-seed "${name}" \
-    --chain-path "${DATA_DIR}/${name}.bin" \
+    --chain-path "${DATA_DIR}/${name}" \
     --validator "${VALIDATORS[0]}" \
     --validator "${VALIDATORS[1]}" \
     --validator "${VALIDATORS[2]}" \

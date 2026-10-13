@@ -159,15 +159,18 @@ ChainStore, its memory cache, filesystem I/O, snapshot serialization, and storag
 tests. The domain no longer depends on Tokio or bincode. Consensus and sync use
 the storage adapter only as a dev-dependency for tests.
 
-The CLI constructs the adapters and supplies shared trait-object handles for
-BlockStorePort, BlockNetworkPort, and PeerReputationPort. NodeRuntime remains
-non-generic; SimpleConsensus and SyncService remain concrete application services.
-The node's production dependencies no longer include network or storage adapters
-(they are dev-dependencies only). BlockRequestPort remains the narrower sync
-transport contract. Ports no longer require Clone; shared Arc handles provide
-cloning without tying the contracts to concrete adapters.
+The ports crate owns concrete NetworkHandle and PeerReputationHandle channel
+senders and their transport-neutral commands. The network adapter consumes these
+commands; libp2p and scoring policy stay in that adapter. The CLI wires the
+workers and handles. NodeRuntime and SyncService are non-generic, with only
+storage behind Arc<dyn BlockStorePort>; consensus remains concrete.
+The node has no network adapter dependency, even in tests. Storage is only a
+dev-dependency. Channel receivers let tests inspect commands without fake trait
+implementations or a running transport. Network commands retain bounded waiting;
+reputation updates retain their existing best-effort full/closed-queue behavior.
+These channel-based ports intentionally depend on Tokio, not libp2p.
 
-Persistence format and write-before-memory ordering are unchanged. Existing
+At the completion of #5, persistence format and write-before-memory ordering were unchanged. Existing
 reopen, failed-write/retry, and genesis-mismatch tests exercise the moved adapter.
 
 Verification: workspace library/binary tests, workspace Clippy with warnings
@@ -215,9 +218,30 @@ If skipped: a new adapter can compile while supplying incorrect chain state.
 
 #### 7. Persistence rewrites the whole chain for every block
 
+Status: fixed. ChainStore writes one serialized block to a temporary file, syncs
+it, renames it into place, and syncs the block directory before updating memory.
+Existing block files are not rewritten. Opening and writing run on Tokio blocking
+workers; reads can use the committed memory cache while a disk write is pending.
+A shared writer gate serializes inserts, and the worker owns the memory update
+and gate so cancelling its caller cannot split the disk and memory commit.
+
+chain_path now names a directory (default chain-data), not a snapshot file.
+Old snapshot files are rejected without modification; no migration is provided
+for this undeployed format. Reopen ignores unfinished .tmp files and rejects
+corrupt committed files or filename/hash mismatches. Use one writer per directory
+and clone its handle; independent opens are intended for read-only inspection.
+
+Tests cover incremental writes, concurrent duplicate inserts, reopen with an
+unfinished file, corrupt files, old-format rejection, cancellation during commit,
+and consensus persistence failure/retry. Full-history loading and memory usage
+remain proportional to chain size; this is not an indexed database or pruning.
+
+Verification: workspace library/binary tests, Clippy with warnings denied,
+formatting, shell syntax, and the six-node late-join test passed (19.66s).
+
 Source: [persistence implementation](crates/storage/src/lib.rs).
 
-Each insertion clones and serializes all blocks, then performs synchronous
+Original finding: each insertion clones and serializes all blocks, then performs synchronous
 filesystem operations while holding the store lock. Each insertion becomes more
 expensive as history grows and blocks other store operations.
 

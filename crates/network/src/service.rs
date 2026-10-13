@@ -4,7 +4,6 @@ use std::{
 };
 
 use anyhow::Context;
-use async_trait::async_trait;
 use ed25519_dalek::SigningKey;
 use libp2p::{
     Multiaddr, Swarm, SwarmBuilder,
@@ -19,7 +18,9 @@ use libp2p::{
     },
 };
 use p2p_chain_lib_chain::block::{Block, BlockHash};
-use p2p_chain_lib_ports::{BlockNetworkPort, BlockRequestPort, NetworkEvent, PeerId};
+use p2p_chain_lib_ports::{
+    NetworkCommand, NetworkEvent, NetworkHandle, PeerId, PeerReputationHandle,
+};
 use p2p_chain_lib_protocol::{
     codec,
     messages::{BlockAnnouncement, BlockRequest, BlockResponse, ChainTip, Transaction},
@@ -35,8 +36,7 @@ use crate::{
         BLOCK_ANNOUNCEMENT_TOPIC, BLOCK_TOPIC, CHAIN_TIP_TOPIC, NetworkBehaviour,
         NetworkBehaviourEvent, TX_TOPIC,
     },
-    command::NetworkCommand,
-    peer_score::{PeerScoreEvent, PeerScoreHandle},
+    peer_score::PeerScoreEvent,
 };
 
 const DEFAULT_COMMAND_BUFFER: usize = 1024;
@@ -58,114 +58,11 @@ pub struct NetworkConfig {
     pub max_block_requests_per_second: u16,
 }
 
-#[derive(Debug, Clone)]
-pub struct NetworkHandle {
-    command_tx: mpsc::Sender<NetworkCommand>,
-    listen_addr: PeerAddress,
-}
-
-impl NetworkHandle {
-    fn with_listen_addr(
-        command_tx: mpsc::Sender<NetworkCommand>,
-        listen_addr: PeerAddress,
-    ) -> Self {
-        Self {
-            command_tx,
-            listen_addr,
-        }
-    }
-
-    pub fn listen_addr(&self) -> &str {
-        self.listen_addr.as_str()
-    }
-
-    async fn send(&self, command: NetworkCommand) -> anyhow::Result<()> {
-        self.command_tx.send(command).await?;
-        Ok(())
-    }
-
-    pub async fn broadcast_transaction(&self, tx: Transaction) -> anyhow::Result<()> {
-        self.send(NetworkCommand::BroadcastTransaction(tx)).await
-    }
-
-    pub async fn broadcast_block(&self, block: Block) -> anyhow::Result<()> {
-        self.send(NetworkCommand::BroadcastBlock(block)).await
-    }
-
-    pub async fn broadcast_chain_tip(&self, tip: ChainTip) -> anyhow::Result<()> {
-        self.send(NetworkCommand::BroadcastChainTip(tip)).await
-    }
-
-    pub async fn request_block(
-        &self,
-        peer_id: PeerId,
-        block_hash: BlockHash,
-    ) -> anyhow::Result<()> {
-        self.send(NetworkCommand::RequestBlock {
-            peer_id,
-            block_hash,
-        })
-        .await
-    }
-
-    pub async fn send_block(&self, peer_id: PeerId, block: Block) -> anyhow::Result<()> {
-        self.send(NetworkCommand::SendBlock {
-            peer_id,
-            block_hash: block.hash.clone(),
-            block: Some(block),
-        })
-        .await
-    }
-
-    pub async fn send_block_not_found(
-        &self,
-        peer_id: PeerId,
-        block_hash: BlockHash,
-    ) -> anyhow::Result<()> {
-        self.send(NetworkCommand::SendBlock {
-            peer_id,
-            block_hash,
-            block: None,
-        })
-        .await
-    }
-}
-
-#[async_trait]
-impl BlockRequestPort for NetworkHandle {
-    async fn request_block(&self, peer_id: PeerId, block_hash: BlockHash) -> anyhow::Result<()> {
-        self.request_block(peer_id, block_hash).await
-    }
-}
-
-#[async_trait]
-impl BlockNetworkPort for NetworkHandle {
-    async fn broadcast_block(&self, block: Block) -> anyhow::Result<()> {
-        self.broadcast_block(block).await
-    }
-
-    async fn broadcast_chain_tip(&self, tip: ChainTip) -> anyhow::Result<()> {
-        self.broadcast_chain_tip(tip).await
-    }
-
-    async fn send_block(&self, peer_id: PeerId, block: Block) -> anyhow::Result<()> {
-        self.send_block(peer_id, block).await
-    }
-
-    async fn send_block_not_found(
-        &self,
-        peer_id: PeerId,
-        block_hash: BlockHash,
-    ) -> anyhow::Result<()> {
-        self.send_block_not_found(peer_id, block_hash).await
-    }
-}
-
 pub struct NetworkService {
     config: NetworkConfig,
     command_rx: mpsc::Receiver<NetworkCommand>,
     event_tx: mpsc::Sender<NetworkEvent>,
-    peer_score: PeerScoreHandle,
+    peer_score: PeerReputationHandle,
     peer_score_event_rx: mpsc::Receiver<PeerScoreEvent>,
     pending_node_events: PendingNodeEvents,
     peer_rate_limiter: PeerRateLimiter,
@@ -313,11 +210,11 @@ impl NetworkService {
     pub fn new(
         config: NetworkConfig,
         event_tx: mpsc::Sender<NetworkEvent>,
-        peer_score: PeerScoreHandle,
+        peer_score: PeerReputationHandle,
         peer_score_event_rx: mpsc::Receiver<PeerScoreEvent>,
     ) -> anyhow::Result<(Self, NetworkHandle)> {
         let (command_tx, command_rx) = mpsc::channel(DEFAULT_COMMAND_BUFFER);
-        let handle = NetworkHandle::with_listen_addr(command_tx, config.listen_addr.clone());
+        let handle = NetworkHandle::new(command_tx);
         let service = Self {
             config,
             command_rx,
@@ -1476,7 +1373,7 @@ mod tests {
                 max_block_requests_per_second: DEFAULT_MAX_BLOCK_REQUESTS_PER_SECOND,
             },
             event_tx,
-            PeerScoreHandle::new(peer_score_command_tx),
+            PeerReputationHandle::new(peer_score_command_tx),
             peer_score_event_rx,
         )?;
 

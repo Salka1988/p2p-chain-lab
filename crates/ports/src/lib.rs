@@ -1,6 +1,10 @@
-use std::{fmt, sync::Arc};
+use std::fmt;
 
-use async_trait::async_trait;
+mod network;
+mod reputation;
+pub use network::{NetworkCommand, NetworkHandle};
+pub use reputation::{PeerReputationHandle, PeerScoreCommand};
+
 use p2p_chain_lib_chain::block::{Block, BlockHash};
 use p2p_chain_lib_protocol::messages::{BlockAnnouncement, ChainTip, Transaction};
 
@@ -104,46 +108,4 @@ pub enum NetworkEvent {
         peer_id: PeerId,
         reason: String,
     },
-}
-
-#[async_trait]
-pub trait BlockRequestPort: Send + Sync + 'static {
-    async fn request_block(&self, peer_id: PeerId, block_hash: BlockHash) -> anyhow::Result<()>;
-}
-
-#[async_trait]
-pub trait PeerReputationPort: Send + Sync + 'static {
-    async fn report_good_peer(&self, peer_id: PeerId, reason: String) -> anyhow::Result<()>;
-    async fn report_bad_peer(&self, peer_id: PeerId, reason: String) -> anyhow::Result<()>;
-}
-
-/// Block transport operations needed by the node application.
-#[async_trait]
-pub trait BlockNetworkPort: BlockRequestPort {
-    async fn broadcast_block(&self, block: Block) -> anyhow::Result<()>;
-    async fn broadcast_chain_tip(&self, tip: ChainTip) -> anyhow::Result<()>;
-    async fn send_block(&self, peer_id: PeerId, block: Block) -> anyhow::Result<()>;
-    async fn send_block_not_found(
-        &self,
-        peer_id: PeerId,
-        block_hash: BlockHash,
-    ) -> anyhow::Result<()>;
-}
-
-#[async_trait]
-impl<T: BlockRequestPort + ?Sized> BlockRequestPort for Arc<T> {
-    async fn request_block(&self, peer_id: PeerId, block_hash: BlockHash) -> anyhow::Result<()> {
-        (**self).request_block(peer_id, block_hash).await
-    }
-}
-
-#[async_trait]
-impl<T: PeerReputationPort + ?Sized> PeerReputationPort for Arc<T> {
-    async fn report_good_peer(&self, peer_id: PeerId, reason: String) -> anyhow::Result<()> {
-        (**self).report_good_peer(peer_id, reason).await
-    }
-
-    async fn report_bad_peer(&self, peer_id: PeerId, reason: String) -> anyhow::Result<()> {
-        (**self).report_bad_peer(peer_id, reason).await
-    }
 }

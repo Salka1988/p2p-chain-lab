@@ -4,13 +4,13 @@ mod task_group;
 use std::{sync::Arc, time::Duration};
 
 use p2p_chain_lib_chain::store::BlockStorePort;
-use p2p_chain_lib_ports::{BlockNetworkPort, PeerReputationPort};
+use p2p_chain_lib_ports::PeerReputationHandle;
 
 use crate::task_group::TaskGroup;
 use p2p_chain_lib_consensus::{SimpleConsensus, validator_id_from_seed};
 use p2p_chain_lib_mempool::Mempool;
 use p2p_chain_lib_network::{
-    peer_score::{PeerScoreActor, PeerScoreHandle},
+    peer_score::PeerScoreActor,
     service::{NetworkConfig, NetworkService},
 };
 use p2p_chain_lib_node::node::{Node, NodeRuntime};
@@ -42,8 +42,9 @@ async fn main() -> anyhow::Result<()> {
     let (peer_score_command_tx, peer_score_command_rx) = tokio::sync::mpsc::channel(1024);
     let (peer_score_event_tx, peer_score_event_rx) = tokio::sync::mpsc::channel(1024);
 
-    let peer_score = PeerScoreHandle::new(peer_score_command_tx);
-    let chain_store: Arc<dyn BlockStorePort> = Arc::new(ChainStore::open(&config.chain_path)?);
+    let peer_score = PeerReputationHandle::new(peer_score_command_tx);
+    let chain_store: Arc<dyn BlockStorePort> =
+        Arc::new(ChainStore::open(&config.chain_path).await?);
     let consensus = SimpleConsensus::with_genesis(
         consensus_seed,
         chain_store.clone(),
@@ -59,8 +60,6 @@ async fn main() -> anyhow::Result<()> {
         peer_score.clone(),
         peer_score_event_rx,
     )?;
-    let network: Arc<dyn BlockNetworkPort> = Arc::new(network);
-    let peer_score: Arc<dyn PeerReputationPort> = Arc::new(peer_score);
     let sync = SyncService::new(network.clone(), chain_store.clone(), peer_score.clone());
     let network_cancellation_token = task_group.child_token();
     let peer_score_cancellation_token = task_group.child_token();
