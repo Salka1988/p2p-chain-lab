@@ -2,7 +2,7 @@ use std::{collections::HashMap, path::PathBuf, time::Duration};
 
 use anyhow::{Context, ensure};
 use clap::{Parser, builder::NonEmptyStringValueParser};
-use p2p_chain_lib_node::config::Config;
+use p2p_chain_lib_node::config::{Config, GenesisConfig};
 use p2p_chain_lib_ports::PeerAddress;
 use serde::Deserialize;
 
@@ -12,6 +12,8 @@ const ENV_FIELDS: &[&str] = &[
     "NODE_KEY_SEED",
     "CHAIN_PATH",
     "VALIDATOR",
+    "GENESIS__CHAIN_ID",
+    "GENESIS__VALIDATORS",
     "PRODUCE_BLOCK_INTERVAL_MS",
     "MAX_GOSSIP_EVENTS_PER_SECOND",
     "MAX_BLOCK_REQUESTS_PER_SECOND",
@@ -25,6 +27,12 @@ const ENV_FIELDS: &[&str] = &[
     args_override_self = true
 )]
 struct Cli {
+    #[arg(skip)]
+    genesis: Option<GenesisSettings>,
+
+    #[arg(long)]
+    #[serde(skip)]
+    chain_id: Option<String>,
     /// Optional TOML configuration file. Explicit flags override environment and file values.
     #[arg(long, value_name = "FILE")]
     #[serde(skip)]
@@ -60,6 +68,13 @@ struct Cli {
     max_block_requests_per_second: Option<u16>,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct GenesisSettings {
+    chain_id: Option<String>,
+    validators: Option<Vec<String>>,
+}
+
 pub fn from_args() -> anyhow::Result<Config> {
     Cli::try_parse()?.load(std::env::vars().collect())
 }
@@ -77,21 +92,42 @@ impl Cli {
                 ::config::File::from(path.as_path()).format(::config::FileFormat::Toml),
             );
         }
+        // Normalize the legacy TOML spelling before applying higher-priority sources.
+        let file = builder.build()?;
+        let legacy = file.get::<Vec<String>>("validator").ok();
+        ensure!(
+            legacy.is_none() || file.get::<Vec<String>>("genesis.validators").is_err(),
+            "use genesis.validators or validator, not both"
+        );
+        let mut builder = ::config::Config::builder()
+            .add_source(file)
+            .set_override_option("genesis.validators", legacy)?;
         let bootstrap = env.remove("P2P_BOOTSTRAP").map(parse_env_list);
-        let validators = env.remove("P2P_VALIDATOR").map(parse_env_list);
+        let legacy = env.remove("P2P_VALIDATOR");
+        let nested = env.remove("P2P_GENESIS__VALIDATORS");
+        ensure!(
+            legacy.is_none() || nested.is_none(),
+            "use only one validator environment spelling"
+        );
+        let validators = nested.or(legacy).map(parse_env_list);
+        // Apply this after the TOML alias, before explicit CLI flags.
+        if let Some(validators) = validators {
+            builder = builder.set_override("genesis.validators", validators)?;
+        }
         let settings: Self = builder
             .add_source(
                 ::config::Environment::with_prefix("P2P")
                     .prefix_separator("_")
+                    .separator("__")
                     .source(Some(env)),
             )
             .set_override_option("bootstrap", bootstrap)?
-            .set_override_option("validator", validators)?
             .set_override_option("listen", self.listen)?
             .set_override_option("bootstrap", self.bootstrap)?
             .set_override_option("node_key_seed", self.node_key_seed)?
             .set_override_option("chain_path", self.chain_path)?
-            .set_override_option("validator", self.validator)?
+            .set_override_option("genesis.validators", self.validator)?
+            .set_override_option("genesis.chain_id", self.chain_id)?
             .set_override_option("produce_block_interval_ms", self.produce_block_interval_ms)?
             .set_override_option(
                 "max_gossip_events_per_second",
@@ -110,6 +146,10 @@ impl Cli {
 
     fn finish(self) -> anyhow::Result<Config> {
         let defaults = Config::default();
+        let genesis = self.genesis.unwrap_or(GenesisSettings {
+            chain_id: None,
+            validators: None,
+        });
         let config = Config {
             listen_addr: self
                 .listen
@@ -127,7 +167,10 @@ impl Cli {
                 .map(PathBuf::from)
                 .unwrap_or(defaults.chain_path),
             block_production_interval: self.produce_block_interval_ms.map(Duration::from_millis),
-            validators: self.validator.unwrap_or_default(),
+            genesis: GenesisConfig {
+                chain_id: genesis.chain_id.unwrap_or(defaults.genesis.chain_id),
+                validators: genesis.validators.unwrap_or_default(),
+            },
             max_gossip_events_per_second: self
                 .max_gossip_events_per_second
                 .unwrap_or(defaults.max_gossip_events_per_second),
@@ -156,10 +199,15 @@ impl Cli {
         );
         ensure!(
             config
+                .genesis
                 .validators
                 .iter()
                 .all(|validator| !validator.is_empty()),
             "validator entries must not be empty"
+        );
+        ensure!(
+            !config.genesis.chain_id.trim().is_empty(),
+            "genesis.chain_id must not be empty"
         );
         ensure!(
             config.block_production_interval != Some(Duration::ZERO),
@@ -192,6 +240,37 @@ fn parse_env_list(value: String) -> Vec<String> {
 mod tests {
     use super::*;
 
+    #[test]
+    fn nested_genesis_obeys_layer_precedence() -> anyhow::Result<()> {
+        let file = tempfile::NamedTempFile::new()?;
+        std::fs::write(
+            file.path(),
+            "[genesis]\nchain_id = 'file'\nvalidators = ['file-key']\n",
+        )?;
+        let path = file.path().to_str().unwrap();
+        let config = Cli::try_parse_from(["node", "--config", path])?.load(HashMap::new())?;
+        assert_eq!(config.genesis.chain_id, "file");
+        assert_eq!(config.genesis.validators, ["file-key"]);
+        let environment = env(&[
+            ("P2P_GENESIS__CHAIN_ID", "env"),
+            ("P2P_GENESIS__VALIDATORS", "env-key"),
+        ]);
+        let config = Cli::try_parse_from(["node", "--config", path])?.load(environment.clone())?;
+        assert_eq!(config.genesis.chain_id, "env");
+        assert_eq!(config.genesis.validators, ["env-key"]);
+        let config = Cli::try_parse_from([
+            "node",
+            "--config",
+            path,
+            "--chain-id=cli",
+            "--validator=cli-key",
+        ])?
+        .load(environment)?;
+        assert_eq!(config.genesis.chain_id, "cli");
+        assert_eq!(config.genesis.validators, ["cli-key"]);
+        Ok(())
+    }
+
     fn env(values: &[(&str, &str)]) -> HashMap<String, String> {
         values
             .iter()
@@ -214,7 +293,7 @@ mod tests {
             defaults.max_block_requests_per_second
         );
         assert!(config.bootstrap_peers.is_empty());
-        assert!(config.validators.is_empty());
+        assert!(config.genesis.validators.is_empty());
         assert!(config.node_key_seed.is_none());
         assert!(config.block_production_interval.is_none());
         Ok(())
@@ -249,7 +328,7 @@ max_gossip_events_per_second = 70
         assert_eq!(config.listen_addr.as_str(), "/ip4/127.0.0.1/tcp/4002");
         assert_eq!(config.bootstrap_peers.len(), 2);
         assert_eq!(config.bootstrap_peers[1].as_str(), "env-peer-b");
-        assert_eq!(config.validators, ["env-validator"]);
+        assert_eq!(config.genesis.validators, ["env-validator"]);
         assert_eq!(config.node_key_seed.as_deref(), Some("00123"));
         assert_eq!(
             config.block_production_interval,
@@ -270,7 +349,7 @@ max_gossip_events_per_second = 70
         .load(environment)?;
         assert_eq!(config.listen_addr.as_str(), "/ip4/127.0.0.1/tcp/4003");
         assert_eq!(config.bootstrap_peers, [PeerAddress::from("cli-peer")]);
-        assert_eq!(config.validators, ["cli-validator"]);
+        assert_eq!(config.genesis.validators, ["cli-validator"]);
         assert_eq!(
             config.block_production_interval,
             Some(Duration::from_millis(300))
@@ -278,7 +357,7 @@ max_gossip_events_per_second = 70
         let config = Cli::try_parse_from(["node", "--config", path])?
             .load(env(&[("P2P_BOOTSTRAP", ""), ("P2P_VALIDATOR", "")]))?;
         assert!(config.bootstrap_peers.is_empty());
-        assert!(config.validators.is_empty());
+        assert!(config.genesis.validators.is_empty());
         assert_eq!(config.max_gossip_events_per_second, 70);
         Ok(())
     }
@@ -364,7 +443,7 @@ max_gossip_events_per_second = 70
             config.chain_path,
             std::path::PathBuf::from("/tmp/chain.bin")
         );
-        assert_eq!(config.validators, vec!["node-a", "node-b"]);
+        assert_eq!(config.genesis.validators, vec!["node-a", "node-b"]);
         assert_eq!(
             config.block_production_interval,
             Some(Duration::from_millis(250))

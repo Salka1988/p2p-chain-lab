@@ -11,7 +11,7 @@ pub struct Config {
     pub node_key_seed: Option<String>,
     pub chain_path: PathBuf,
     pub block_production_interval: Option<Duration>,
-    pub validators: Vec<String>,
+    pub genesis: GenesisConfig,
     pub max_gossip_events_per_second: u16,
     pub max_block_requests_per_second: u16,
 }
@@ -24,9 +24,24 @@ impl Default for Config {
             node_key_seed: None,
             chain_path: PathBuf::from("chain.bin"),
             block_production_interval: None,
-            validators: Vec::new(),
+            genesis: GenesisConfig::default(),
             max_gossip_events_per_second: 64,
             max_block_requests_per_second: 16,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct GenesisConfig {
+    pub chain_id: String,
+    pub validators: Vec<String>,
+}
+
+impl Default for GenesisConfig {
+    fn default() -> Self {
+        Self {
+            chain_id: "local-devnet".into(),
+            validators: Vec::new(),
         }
     }
 }

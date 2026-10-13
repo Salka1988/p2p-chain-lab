@@ -324,7 +324,7 @@ mod tests {
     use p2p_chain_lib_consensus::ConsensusCommand;
     use p2p_chain_lib_network::{
         PeerAddress,
-        peer_score::PeerScoreHandle,
+        peer_score::{PeerScoreCommand, PeerScoreHandle},
         service::{NetworkConfig, NetworkService},
     };
     use p2p_chain_lib_ports::PeerId;
@@ -334,7 +334,7 @@ mod tests {
     async fn empty_node_rebuilds_a_chain_from_tip_first_blocks() -> anyhow::Result<()> {
         let source_consensus = SimpleConsensus::new("node-a", ChainStore::new());
         let mut blocks = Vec::new();
-        for _ in 0..3 {
+        for _ in 0..20 {
             let commands = source_consensus.handle_event(ConsensusEvent::Tick).await?;
             let block = commands
                 .into_iter()
@@ -347,7 +347,7 @@ mod tests {
         }
 
         let (network_event_tx, network_event_rx) = mpsc::channel(8);
-        let (peer_score_command_tx, _peer_score_command_rx) = mpsc::channel(8);
+        let (peer_score_command_tx, mut peer_score_command_rx) = mpsc::channel(64);
         let (_peer_score_event_tx, peer_score_event_rx) = mpsc::channel(8);
         let peer_score = PeerScoreHandle::new(peer_score_command_tx);
         let (_network_service, network) = NetworkService::new(
@@ -389,7 +389,7 @@ mod tests {
             tokio::task::yield_now().await;
         }
 
-        timeout(std::time::Duration::from_secs(1), async {
+        timeout(std::time::Duration::from_secs(5), async {
             while chain_store.len().await != blocks.len() {
                 tokio::task::yield_now().await;
             }
@@ -400,6 +400,12 @@ mod tests {
 
         cancellation_token.cancel();
         node_task.await??;
+        while let Ok(command) = peer_score_command_rx.try_recv() {
+            assert!(
+                !matches!(command, PeerScoreCommand::BadMessage { .. }),
+                "valid reverse-order history must not penalize its sender: {command:?}"
+            );
+        }
         Ok(())
     }
 }

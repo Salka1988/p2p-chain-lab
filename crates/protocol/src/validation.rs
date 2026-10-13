@@ -29,7 +29,7 @@ pub fn validate_block(block: &Block) -> anyhow::Result<()> {
     anyhow::ensure!(!block.body.is_empty(), "block body cannot be empty");
     anyhow::ensure!(!block.producer.is_empty(), "block producer cannot be empty");
     anyhow::ensure!(
-        !block.signature.is_empty(),
+        block.height == 0 || !block.signature.is_empty(),
         "block signature cannot be empty"
     );
 

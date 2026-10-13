@@ -30,7 +30,7 @@ async fn main() -> anyhow::Result<()> {
         bootstrap_peers: config.bootstrap_peers.clone(),
         node_key_seed: config.node_key_seed.clone(),
         validator_id: Some(consensus_node_id.clone()),
-        validators: config.validators.clone(),
+        validators: config.genesis.validators.clone(),
         max_gossip_events_per_second: config.max_gossip_events_per_second,
         max_block_requests_per_second: config.max_block_requests_per_second,
     };
@@ -41,6 +41,13 @@ async fn main() -> anyhow::Result<()> {
 
     let peer_score = PeerScoreHandle::new(peer_score_command_tx);
     let chain_store = ChainStore::open(&config.chain_path)?;
+    let consensus = SimpleConsensus::with_genesis(
+        consensus_seed,
+        chain_store.clone(),
+        &config.genesis.chain_id,
+        config.genesis.validators,
+    )
+    .await?;
     let mempool = Mempool::new();
 
     let (network_service, network) = NetworkService::new(
@@ -49,8 +56,6 @@ async fn main() -> anyhow::Result<()> {
         peer_score.clone(),
         peer_score_event_rx,
     )?;
-    let consensus =
-        SimpleConsensus::with_validators(consensus_seed, chain_store.clone(), config.validators)?;
     let sync = SyncService::new(network.clone(), chain_store.clone(), peer_score.clone());
     let network_cancellation_token = task_group.child_token();
     let peer_score_cancellation_token = task_group.child_token();

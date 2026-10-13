@@ -15,6 +15,9 @@ use p2p_chain_lib_protocol::{
 use tokio::sync::Mutex;
 
 const PENDING_BLOCK_TIMEOUT: Duration = Duration::from_secs(10);
+// Leave headroom below the network's default 16 requests/second ingress limit.
+// shortcut: peers with stricter limits need negotiated request pacing before use.
+const BLOCK_REQUEST_INTERVAL: Duration = Duration::from_millis(125);
 const MAX_ORPHAN_BLOCKS: usize = 1024;
 const MAX_ORPHAN_BLOCK_BYTES: usize = 16 * 1024 * 1024;
 
@@ -32,6 +35,7 @@ pub struct SyncService<N, C, R> {
     peer_reputation: R,
     pending_blocks: Arc<Mutex<HashMap<BlockHash, tokio::time::Instant>>>,
     orphan_blocks: Arc<Mutex<OrphanBlocks>>,
+    next_block_request: Arc<Mutex<tokio::time::Instant>>,
 }
 
 #[derive(Debug, Default)]
@@ -54,6 +58,7 @@ where
             peer_reputation,
             pending_blocks: Arc::new(Mutex::new(HashMap::new())),
             orphan_blocks: Arc::new(Mutex::new(OrphanBlocks::default())),
+            next_block_request: Arc::new(Mutex::new(tokio::time::Instant::now())),
         }
     }
 
@@ -83,7 +88,6 @@ where
             }
 
             if let Err(error) = self
-                .network
                 .request_block(peer_id.clone(), tip.block_hash.clone())
                 .await
             {
@@ -175,7 +179,6 @@ where
             return Ok(());
         }
         if let Err(error) = self
-            .network
             .request_block(peer_id.clone(), block_hash.clone())
             .await
         {
@@ -188,6 +191,14 @@ where
                 .await?;
             return Err(error);
         }
+        Ok(())
+    }
+
+    async fn request_block(&self, peer_id: PeerId, block_hash: BlockHash) -> anyhow::Result<()> {
+        let mut next_request = self.next_block_request.lock().await;
+        tokio::time::sleep_until(*next_request).await;
+        self.network.request_block(peer_id, block_hash).await?;
+        *next_request = tokio::time::Instant::now() + BLOCK_REQUEST_INTERVAL;
         Ok(())
     }
 
@@ -326,6 +337,26 @@ mod tests {
             signature: vec![1],
             body: vec![1],
         }
+    }
+
+    #[tokio::test]
+    async fn paces_tip_and_parent_requests_across_clones() -> anyhow::Result<()> {
+        let (request_tx, mut request_rx) = mpsc::channel(4);
+        let sync = SyncService::new(
+            RecordingNetwork { request_tx },
+            ChainStore::new(),
+            RecordingReputation::default(),
+        );
+        sync.on_chain_tip(PeerId::from("peer-a"), chain_tip(3))
+            .await?;
+        assert!(request_rx.recv().await.is_some());
+        let next_request = *sync.next_block_request.lock().await;
+        sync.clone()
+            .on_unaccepted_block(PeerId::from("peer-a"), child_block(3, 2, 3))
+            .await?;
+        assert!(request_rx.recv().await.is_some());
+        assert!(tokio::time::Instant::now() >= next_request);
+        Ok(())
     }
 
     #[tokio::test]

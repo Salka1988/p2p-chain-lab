@@ -48,6 +48,7 @@ pub struct SimpleConsensus<C> {
     validator_keys: Vec<VerifyingKey>,
     chain_store: C,
     producer_state: std::sync::Arc<Mutex<ProducerState>>,
+    genesis: Option<Block>,
 }
 
 #[derive(Debug, Default)]
@@ -87,7 +88,68 @@ where
             validator_keys,
             chain_store,
             producer_state: std::sync::Arc::new(Mutex::new(ProducerState::default())),
+            genesis: None,
         })
+    }
+
+    /// Initialize a chain anchored to configuration, without a producer signature.
+    pub async fn with_genesis(
+        seed: impl AsRef<str>,
+        chain_store: C,
+        chain_id: &str,
+        validators: Vec<String>,
+    ) -> anyhow::Result<Self> {
+        anyhow::ensure!(
+            !chain_id.trim().is_empty(),
+            "genesis chain_id must not be empty"
+        );
+        anyhow::ensure!(
+            !validators.is_empty(),
+            "genesis validators must not be empty"
+        );
+        let mut consensus = Self::with_validators(seed, chain_store, validators)?;
+        let mut body = b"p2p-chain-lib/genesis/v1".to_vec();
+        body.extend_from_slice(&(chain_id.len() as u64).to_le_bytes());
+        body.extend_from_slice(chain_id.as_bytes());
+        for (index, key) in consensus.validator_keys.iter().enumerate() {
+            anyhow::ensure!(
+                !consensus.validator_keys[..index].contains(key),
+                "duplicate genesis validator"
+            );
+            body.extend_from_slice(key.as_bytes());
+        }
+        let mut genesis = Block {
+            hash: BlockHash::zero(),
+            parent_hash: None,
+            height: 0,
+            producer: "genesis".into(),
+            signature: Vec::new(),
+            body,
+        };
+        genesis.hash = block_hash(&genesis);
+        if let Some(mut block) = consensus.chain_store.selected_tip().await {
+            while block.height > 0 {
+                let parent = block
+                    .parent_hash
+                    .as_ref()
+                    .ok_or_else(|| anyhow::anyhow!("stored chain has no parent"))?;
+                let parent = consensus
+                    .chain_store
+                    .get_block(parent)
+                    .await
+                    .ok_or_else(|| anyhow::anyhow!("stored chain is missing an ancestor"))?;
+                anyhow::ensure!(parent.height == block.height - 1, "invalid stored ancestry");
+                block = parent;
+            }
+            anyhow::ensure!(
+                block == genesis,
+                "stored genesis does not match configuration; use a new chain_path for a new chain"
+            );
+        } else {
+            consensus.chain_store.insert_block(genesis.clone()).await?;
+        }
+        consensus.genesis = Some(genesis);
+        Ok(consensus)
     }
 
     async fn produce_block(&self) -> Option<Block> {
@@ -154,6 +216,12 @@ where
     }
 
     pub fn validate_block_candidate(&self, block: &Block) -> anyhow::Result<()> {
+        if block.height == 0
+            && let Some(genesis) = &self.genesis
+        {
+            anyhow::ensure!(block == genesis, "block does not match configured genesis");
+            return Ok(());
+        }
         validate_block(block)?;
         anyhow::ensure!(
             block.hash == block_hash(block),
@@ -253,6 +321,13 @@ where
                     ]);
                 }
 
+                // A valid candidate with missing ancestry must be buffered by sync first.
+                if let Some(parent_hash) = &block.parent_hash
+                    && self.chain_store.get_block(parent_hash).await.is_none()
+                {
+                    return Ok(Vec::new());
+                }
+
                 match self.validate_received_block(&block).await {
                     Ok(()) => {
                         self.observe_valid_block(&block).await;
@@ -292,7 +367,7 @@ fn validator_id(key: &VerifyingKey) -> String {
 
 fn parse_validator_id(value: &str) -> anyhow::Result<VerifyingKey> {
     anyhow::ensure!(
-        value.len() == 64,
+        value.len() == 64 && value.is_ascii(),
         "validator id must be a 32-byte public key encoded as hex"
     );
     let mut bytes = [0; 32];
@@ -336,6 +411,101 @@ fn block_hash(block: &Block) -> BlockHash {
 mod tests {
     use super::*;
     use p2p_chain_lib_chain::store::ChainStore;
+
+    #[tokio::test]
+    async fn configured_genesis_is_shared_and_anchors_production() -> anyhow::Result<()> {
+        let validators = vec![validator_id_from_seed("a")];
+        let store = ChainStore::new();
+        let producer =
+            SimpleConsensus::with_genesis("a", store.clone(), "dev", validators.clone()).await?;
+        let other_store = ChainStore::new();
+        let observer = SimpleConsensus::with_genesis(
+            "observer",
+            other_store.clone(),
+            "dev",
+            validators.clone(),
+        )
+        .await?;
+        let genesis = store.tip().await.unwrap();
+        assert_eq!(Some(genesis.clone()), other_store.tip().await);
+        assert_eq!(genesis.height, 0);
+        observer.validate_block_candidate(&genesis)?;
+        let commands = producer.handle_event(ConsensusEvent::Tick).await?;
+        let ConsensusCommand::StoreBlock(block) = &commands[0] else {
+            panic!("expected block")
+        };
+        assert_eq!(block.height, 1);
+        assert_eq!(block.parent_hash, Some(genesis.hash.clone()));
+        store.insert(block.clone()).await?;
+        SimpleConsensus::with_genesis("a", store.clone(), "dev", validators.clone()).await?;
+        assert!(
+            SimpleConsensus::with_genesis("a", store.clone(), "other", validators)
+                .await
+                .is_err()
+        );
+        assert_eq!(store.len().await, 2);
+        let mut altered = genesis;
+        altered.body.push(1);
+        assert!(observer.validate_block_candidate(&altered).is_err());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn rejects_invalid_genesis_settings() {
+        let key = validator_id_from_seed("a");
+        for (id, validators) in [
+            ("", vec![key.clone()]),
+            ("dev", vec![]),
+            ("dev", vec![key.clone(), key]),
+            ("dev", vec!["invalid".into()]),
+        ] {
+            assert!(
+                SimpleConsensus::with_genesis("a", ChainStore::new(), id, validators)
+                    .await
+                    .is_err()
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn persisted_genesis_mismatch_leaves_file_unchanged() -> anyhow::Result<()> {
+        let path = std::env::temp_dir().join(format!(
+            "genesis-{}-{}.bin",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)?
+                .as_nanos()
+        ));
+        let validators = vec![validator_id_from_seed("a")];
+        SimpleConsensus::with_genesis("a", ChainStore::open(&path)?, "dev", validators.clone())
+            .await?;
+        let bytes = std::fs::read(&path)?;
+        SimpleConsensus::with_genesis(
+            "observer",
+            ChainStore::open(&path)?,
+            "dev",
+            validators.clone(),
+        )
+        .await?;
+        assert!(
+            SimpleConsensus::with_genesis("a", ChainStore::open(&path)?, "different", validators)
+                .await
+                .is_err()
+        );
+        assert!(
+            SimpleConsensus::with_genesis(
+                "a",
+                ChainStore::open(&path)?,
+                "dev",
+                vec![validator_id_from_seed("b")]
+            )
+            .await
+            .is_err()
+        );
+        assert_eq!(std::fs::read(&path)?, bytes);
+        std::fs::remove_file(path)?;
+        Ok(())
+    }
 
     fn signed_block(seed: &str, parent_hash: Option<BlockHash>, height: u64) -> Block {
         let key = signing_key(seed);
@@ -443,7 +613,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn rejects_block_with_unknown_parent() -> anyhow::Result<()> {
+    async fn defers_block_with_unknown_parent_without_penalizing_peer() -> anyhow::Result<()> {
         let consensus = SimpleConsensus::new("node-a", ChainStore::new());
         let block = signed_block("node-a", Some(BlockHash::from_u8(1)), 1);
 
@@ -454,10 +624,33 @@ mod tests {
             })
             .await?;
 
-        assert!(matches!(
-            commands.as_slice(),
-            [ConsensusCommand::ReportBadPeer { .. }]
-        ));
+        assert!(commands.is_empty());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn rejects_invalid_orphan_and_wrong_height_with_known_parent() -> anyhow::Result<()> {
+        let store = ChainStore::new();
+        let parent = signed_block("node-a", None, 0);
+        store.insert(parent.clone()).await?;
+        let consensus = SimpleConsensus::new("node-a", store);
+        let mut invalid_orphan = signed_block("node-a", Some(BlockHash::from_u8(1)), 10);
+        invalid_orphan.signature[0] ^= 1;
+        invalid_orphan.hash = block_hash(&invalid_orphan);
+        let wrong_height = signed_block("node-a", Some(parent.hash), 10);
+
+        for block in [invalid_orphan, wrong_height] {
+            let commands = consensus
+                .handle_event(ConsensusEvent::BlockReceived {
+                    peer_id: PeerId::from("peer-a"),
+                    block,
+                })
+                .await?;
+            assert!(matches!(
+                commands.as_slice(),
+                [ConsensusCommand::ReportBadPeer { .. }]
+            ));
+        }
         Ok(())
     }
 
