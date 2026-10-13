@@ -16,6 +16,9 @@ blockers, which are addressed by the current working tree:
   reached instead of remaining permanently full.
 - `ChainStore` persists blocks and consensus restores its next height and tip
   from the stored chain on startup.
+- Nodes that receive a valid descendant before its parent cache it within fixed
+  count and byte limits, request missing parents, and replay cached children
+  after the parent is accepted.
 
 Verification completed:
 

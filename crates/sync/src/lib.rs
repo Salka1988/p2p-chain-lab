@@ -1,15 +1,22 @@
-use std::{collections::HashMap, sync::Arc, time::Duration};
+use std::{
+    collections::{HashMap, VecDeque},
+    sync::Arc,
+    time::Duration,
+};
 
 use async_trait::async_trait;
-use p2p_chain_lib_chain::block::BlockHash;
+use p2p_chain_lib_chain::block::{Block, BlockHash};
 use p2p_chain_lib_chain::store::BlockStorePort;
 use p2p_chain_lib_ports::{BlockRequestPort, PeerId, PeerReputationPort};
 use p2p_chain_lib_protocol::{
-    messages::BlockAnnouncement, validation::validate_block_announcement,
+    messages::BlockAnnouncement,
+    validation::{validate_block, validate_block_announcement},
 };
 use tokio::sync::Mutex;
 
 const PENDING_BLOCK_TIMEOUT: Duration = Duration::from_secs(10);
+const MAX_ORPHAN_BLOCKS: usize = 1024;
+const MAX_ORPHAN_BLOCK_BYTES: usize = 16 * 1024 * 1024;
 
 #[async_trait]
 pub trait SyncPort: Clone + Send + Sync + 'static {
@@ -28,6 +35,14 @@ pub struct SyncService<N, C, R> {
     chain_store: C,
     peer_reputation: R,
     pending_blocks: Arc<Mutex<HashMap<BlockHash, tokio::time::Instant>>>,
+    orphan_blocks: Arc<Mutex<OrphanBlocks>>,
+}
+
+#[derive(Debug, Default)]
+struct OrphanBlocks {
+    blocks: HashMap<BlockHash, (PeerId, Block)>,
+    insertion_order: VecDeque<BlockHash>,
+    total_bytes: usize,
 }
 
 impl<N, C, R> SyncService<N, C, R>
@@ -42,6 +57,7 @@ where
             chain_store,
             peer_reputation,
             pending_blocks: Arc::new(Mutex::new(HashMap::new())),
+            orphan_blocks: Arc::new(Mutex::new(OrphanBlocks::default())),
         }
     }
 
@@ -127,6 +143,95 @@ where
         Ok(())
     }
 
+    pub async fn on_unaccepted_block(&self, peer_id: PeerId, block: Block) -> anyhow::Result<()> {
+        self.clear_pending(&block.hash).await;
+        if validate_block(&block).is_err() {
+            return Ok(());
+        }
+        let Some(parent_hash) = block.parent_hash.clone() else {
+            return Ok(());
+        };
+        if self.chain_store.get_block(&parent_hash).await.is_some() {
+            return Ok(());
+        }
+        if !self.cache_orphan(peer_id.clone(), block).await {
+            return Ok(());
+        }
+        self.request_missing_block(peer_id, parent_hash).await
+    }
+
+    pub async fn take_children(&self, parent_hash: &BlockHash) -> Vec<(PeerId, Block)> {
+        let mut orphans = self.orphan_blocks.lock().await;
+        let child_hashes = orphans
+            .blocks
+            .iter()
+            .filter_map(|(hash, (_, block))| {
+                (block.parent_hash.as_ref() == Some(parent_hash)).then_some(hash.clone())
+            })
+            .collect::<Vec<_>>();
+        let mut children = Vec::with_capacity(child_hashes.len());
+        for child_hash in &child_hashes {
+            if let Some((peer_id, block)) = orphans.blocks.remove(child_hash) {
+                orphans.total_bytes -= block_size(&block);
+                children.push((peer_id, block));
+            }
+        }
+        orphans
+            .insertion_order
+            .retain(|hash| !child_hashes.contains(hash));
+        children
+    }
+
+    async fn request_missing_block(
+        &self,
+        peer_id: PeerId,
+        block_hash: BlockHash,
+    ) -> anyhow::Result<()> {
+        if !self.mark_pending(block_hash.clone()).await {
+            return Ok(());
+        }
+        if let Err(error) = self
+            .network
+            .request_block(peer_id.clone(), block_hash.clone())
+            .await
+        {
+            self.clear_pending(&block_hash).await;
+            self.peer_reputation
+                .report_bad_peer(
+                    peer_id,
+                    format!("failed to request missing parent block: {error}"),
+                )
+                .await?;
+            return Err(error);
+        }
+        Ok(())
+    }
+
+    async fn cache_orphan(&self, peer_id: PeerId, block: Block) -> bool {
+        let bytes = block_size(&block);
+        if bytes > MAX_ORPHAN_BLOCK_BYTES {
+            return false;
+        }
+        let mut orphans = self.orphan_blocks.lock().await;
+        if orphans.blocks.contains_key(&block.hash) {
+            return true;
+        }
+        while orphans.blocks.len() >= MAX_ORPHAN_BLOCKS
+            || orphans.total_bytes.saturating_add(bytes) > MAX_ORPHAN_BLOCK_BYTES
+        {
+            let Some(oldest_hash) = orphans.insertion_order.pop_front() else {
+                return false;
+            };
+            if let Some((_, oldest)) = orphans.blocks.remove(&oldest_hash) {
+                orphans.total_bytes -= block_size(&oldest);
+            }
+        }
+        orphans.total_bytes += bytes;
+        orphans.insertion_order.push_back(block.hash.clone());
+        orphans.blocks.insert(block.hash.clone(), (peer_id, block));
+        true
+    }
+
     async fn mark_pending(&self, block_hash: BlockHash) -> bool {
         let now = tokio::time::Instant::now();
         let mut pending_blocks = self.pending_blocks.lock().await;
@@ -142,6 +247,10 @@ where
     async fn clear_pending(&self, block_hash: &BlockHash) {
         self.pending_blocks.lock().await.remove(block_hash);
     }
+}
+
+fn block_size(block: &Block) -> usize {
+    block.body.len() + block.producer.len() + block.signature.len() + 72
 }
 
 #[async_trait]
@@ -222,6 +331,17 @@ mod tests {
             hash: BlockHash::from_u8(hash),
             parent_hash: None,
             height: 1,
+            producer: "validator".to_string(),
+            signature: vec![1],
+            body: vec![1],
+        }
+    }
+
+    fn child_block(hash: u8, parent_hash: u8, height: u64) -> Block {
+        Block {
+            hash: BlockHash::from_u8(hash),
+            parent_hash: Some(BlockHash::from_u8(parent_hash)),
+            height,
             producer: "validator".to_string(),
             signature: vec![1],
             body: vec![1],
@@ -366,6 +486,30 @@ mod tests {
             .await?;
 
         assert!(request_rx.recv().await.is_some());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn requests_a_missing_parent_and_releases_its_cached_child() -> anyhow::Result<()> {
+        let (request_tx, mut request_rx) = mpsc::channel(4);
+        let sync = SyncService::new(
+            RecordingNetwork { request_tx },
+            ChainStore::new(),
+            RecordingReputation::default(),
+        );
+        let child = child_block(2, 1, 2);
+
+        sync.on_unaccepted_block(PeerId::from("peer-a"), child.clone())
+            .await?;
+
+        assert!(matches!(
+            request_rx.recv().await,
+            Some((peer_id, hash)) if peer_id == PeerId::from("peer-a") && hash == BlockHash::from_u8(1)
+        ));
+        assert_eq!(
+            sync.take_children(&BlockHash::from_u8(1)).await,
+            vec![(PeerId::from("peer-a"), child)]
+        );
         Ok(())
     }
 }

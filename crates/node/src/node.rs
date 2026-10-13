@@ -149,27 +149,39 @@ impl Node {
                                     height = block.height,
                                     "block received",
                                 );
-                                let block_hash = block.hash.clone();
-                                match Self::handle_consensus_event(
-                                    &runtime.chain_store,
-                                    &runtime.network,
-                                    &runtime.peer_reputation,
-                                    &runtime.consensus,
-                                    ConsensusEvent::BlockReceived { peer_id, block },
-                                ).await {
-                                    Ok(true) => {
-                                        if let Err(error) = runtime.sync.on_block_received(&block_hash).await {
-                                            tracing::warn!(?error, "failed to clear block sync request");
+                                let mut blocks = vec![(peer_id, block)];
+                                while let Some((peer_id, block)) = blocks.pop() {
+                                    let block_hash = block.hash.clone();
+                                    match Self::handle_consensus_event(
+                                        &runtime.chain_store,
+                                        &runtime.network,
+                                        &runtime.peer_reputation,
+                                        &runtime.consensus,
+                                        ConsensusEvent::BlockReceived {
+                                            peer_id: peer_id.clone(),
+                                            block: block.clone(),
+                                        },
+                                    ).await {
+                                        Ok(true) => {
+                                            if let Err(error) = runtime.sync.on_block_received(&block_hash).await {
+                                                tracing::warn!(?error, "failed to clear block sync request");
+                                            }
+                                            blocks.extend(runtime.sync.take_children(&block_hash).await);
                                         }
-                                    }
-                                    Ok(false) => {
-                                        tracing::debug!("received block was not accepted by consensus");
-                                        if let Err(error) = runtime.sync.on_block_request_failed(&block_hash).await {
-                                            tracing::warn!(?error, "failed to clear rejected block sync request");
+                                        Ok(false) => {
+                                            tracing::debug!("received block was not accepted by consensus");
+                                            if runtime.consensus.validate_block_candidate(&block).is_ok()
+                                                && let Err(error) = runtime.sync.on_unaccepted_block(peer_id, block).await
+                                            {
+                                                tracing::warn!(?error, "failed to request an unaccepted block's parent");
+                                            }
                                         }
-                                    }
-                                    Err(error) => {
-                                        tracing::warn!(?error, "failed to handle received block through consensus");
+                                        Err(error) => {
+                                            tracing::warn!(?error, "failed to handle received block through consensus");
+                                            if let Err(error) = runtime.sync.on_block_request_failed(&block_hash).await {
+                                                tracing::warn!(?error, "failed to clear failed block sync request");
+                                            }
+                                        }
                                     }
                                 }
                             }

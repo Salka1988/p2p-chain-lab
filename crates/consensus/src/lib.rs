@@ -138,6 +138,22 @@ where
 
     async fn validate_received_block(&self, block: &Block) -> anyhow::Result<()> {
         self.initialize_state().await;
+        self.validate_block_candidate(block)?;
+
+        let state = self.producer_state.lock().await;
+        anyhow::ensure!(
+            block.height == state.next_height,
+            "block does not extend the selected chain"
+        );
+        anyhow::ensure!(
+            block.parent_hash == state.parent_hash,
+            "block parent is not the selected tip"
+        );
+
+        Ok(())
+    }
+
+    pub fn validate_block_candidate(&self, block: &Block) -> anyhow::Result<()> {
         validate_block(block)?;
         anyhow::ensure!(
             block.hash == block_hash(block),
@@ -155,16 +171,6 @@ where
         expected_producer
             .verify(&block_signing_bytes(block), &signature)
             .map_err(|_| anyhow::anyhow!("block signature is invalid"))?;
-
-        let state = self.producer_state.lock().await;
-        anyhow::ensure!(
-            block.height == state.next_height,
-            "block does not extend the selected chain"
-        );
-        anyhow::ensure!(
-            block.parent_hash == state.parent_hash,
-            "block parent is not the selected tip"
-        );
 
         Ok(())
     }
