@@ -1,7 +1,9 @@
 use std::time::Duration;
 
 use p2p_chain_lib_chain::store::ChainStore;
-use p2p_chain_lib_consensus::{ConsensusCommand, ConsensusEvent, SimpleConsensus};
+use p2p_chain_lib_consensus::{
+    ConsensusCommand, ConsensusEvent, ConsensusOutcome, SimpleConsensus,
+};
 use p2p_chain_lib_mempool::Mempool;
 use p2p_chain_lib_network::{peer_score::PeerScoreHandle, service::NetworkHandle};
 use p2p_chain_lib_ports::{NetworkEvent, PeerReputationPort};
@@ -163,20 +165,19 @@ impl Node {
                                         block: block.clone(),
                                     },
                                 ).await {
-                                    Ok(true) => {
+                                    Ok(ConsensusOutcome::Accepted | ConsensusOutcome::AlreadyKnown) => {
                                         if let Err(error) = runtime.sync.on_block_received(&block_hash).await {
                                             tracing::warn!(?error, "failed to clear block sync request");
                                         }
                                         blocks.extend(runtime.sync.take_children(&block_hash).await);
                                     }
-                                    Ok(false) => {
-                                        tracing::debug!("received block was not accepted by consensus");
-                                        if runtime.consensus.validate_block_candidate(&block).is_ok()
-                                            && let Err(error) = runtime.sync.on_unaccepted_block(peer_id, block).await
+                                    Ok(ConsensusOutcome::MissingParent) => {
+                                        if let Err(error) = runtime.sync.on_unaccepted_block(peer_id, block).await
                                         {
                                             tracing::warn!(?error, "failed to request an unaccepted block's parent");
                                         }
                                     }
+                                    Ok(ConsensusOutcome::Rejected | ConsensusOutcome::NoChange) => {}
                                     Err(error) => {
                                         tracing::warn!(?error, "failed to handle received block through consensus");
                                         if let Err(error) = runtime.sync.on_block_request_failed(&block_hash).await {
@@ -255,16 +256,15 @@ impl Node {
         peer_reputation: &PeerScoreHandle,
         consensus: &SimpleConsensus<ChainStore>,
         event: ConsensusEvent,
-    ) -> anyhow::Result<bool> {
-        let mut stored_block = false;
-        for command in consensus.handle_event(event).await? {
+    ) -> anyhow::Result<ConsensusOutcome> {
+        let decision = consensus.handle_event(event).await?;
+        for command in decision.commands {
             match command {
                 ConsensusCommand::StoreBlock(block) => {
                     let block_hash = block.hash.clone();
                     let height = block.height;
                     let producer = block.producer.clone();
                     let inserted = chain_store.insert(block).await?;
-                    stored_block = true;
                     if inserted {
                         tracing::info!(
                             %block_hash,
@@ -297,7 +297,7 @@ impl Node {
             }
         }
 
-        Ok(stored_block)
+        Ok(decision.outcome)
     }
 }
 
@@ -403,6 +403,7 @@ mod tests {
         for _ in 0..20 {
             let commands = source_consensus.handle_event(ConsensusEvent::Tick).await?;
             let block = commands
+                .commands
                 .into_iter()
                 .find_map(|command| match command {
                     ConsensusCommand::StoreBlock(block) => Some(block),

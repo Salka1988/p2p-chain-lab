@@ -123,6 +123,22 @@ If skipped: sustained traffic can increase memory use and delay synchronization.
 
 #### 4. Consensus outcomes are too ambiguous
 
+Status: fixed in the working tree. Consensus returns a ConsensusDecision with
+explicit Accepted, AlreadyKnown, MissingParent, Rejected, or NoChange outcome
+and the commands to execute. Accepted describes validation, not a committed write:
+the node returns it only after command execution succeeds. Storage still precedes
+broadcast, and execution failures remain errors.
+
+The node requests ancestry only for MissingParent, clears sync state for Accepted
+or AlreadyKnown, and does not repeat candidate validation. AlreadyKnown no longer
+emits a redundant StoreBlock command. Consensus validates a received candidate
+once, then separately checks its chain position. Tests assert received acceptance,
+duplicate handling, missing ancestry without penalties, and rejection of invalid
+orphans and wrong-height blocks.
+
+Verification: workspace library/binary tests, Clippy with warnings denied,
+formatting, and the six-node late-join regression passed (22.58s).
+
 Sources: [block handling](crates/node/src/node.rs),
 [consensus commands](crates/consensus/src/lib.rs).
 
@@ -191,7 +207,7 @@ If skipped: it encourages reintroducing abstractions deliberately removed.
 
 ### Verdict and verification
 
-Keep the concrete SyncService. Findings 1–3 are fixed; fix 4 next. Improve adapter
+Keep the concrete SyncService. Findings 1–4 are fixed. Improve adapter
 boundaries afterward, without a broad “make everything generic” refactor.
 
 Checked: 71 library/binary tests passed with:

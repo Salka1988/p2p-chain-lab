@@ -41,6 +41,23 @@ pub enum ConsensusCommand {
     },
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConsensusOutcome {
+    /// No block transition, e.g. an idle tick or an unknown announcement.
+    NoChange,
+    /// Validated for acceptance; storage commands must still succeed.
+    Accepted,
+    AlreadyKnown,
+    MissingParent,
+    Rejected,
+}
+
+#[derive(Debug, Clone)]
+pub struct ConsensusDecision {
+    pub outcome: ConsensusOutcome,
+    pub commands: Vec<ConsensusCommand>,
+}
+
 #[derive(Debug, Clone)]
 pub struct SimpleConsensus<C> {
     signing_key: SigningKey,
@@ -175,9 +192,7 @@ where
         self.validator_keys.get(validator_index)
     }
 
-    async fn validate_received_block(&self, block: &Block) -> anyhow::Result<()> {
-        self.validate_block_candidate(block)?;
-
+    async fn validate_chain_extension(&self, block: &Block) -> anyhow::Result<()> {
         let (next_height, parent_hash) = self.next_block_position().await;
         anyhow::ensure!(
             block.height == next_height,
@@ -232,30 +247,34 @@ impl<C> SimpleConsensus<C>
 where
     C: BlockStorePort,
 {
-    pub async fn handle_event(
-        &self,
-        event: ConsensusEvent,
-    ) -> anyhow::Result<Vec<ConsensusCommand>> {
+    pub async fn handle_event(&self, event: ConsensusEvent) -> anyhow::Result<ConsensusDecision> {
+        let decision = |outcome, commands| Ok(ConsensusDecision { outcome, commands });
         match event {
             ConsensusEvent::Tick => {
                 let Some(block) = self.produce_block().await else {
-                    return Ok(Vec::new());
+                    return decision(ConsensusOutcome::NoChange, Vec::new());
                 };
 
-                Ok(vec![
-                    ConsensusCommand::StoreBlock(block.clone()),
-                    ConsensusCommand::BroadcastBlock(block),
-                ])
+                decision(
+                    ConsensusOutcome::Accepted,
+                    vec![
+                        ConsensusCommand::StoreBlock(block.clone()),
+                        ConsensusCommand::BroadcastBlock(block),
+                    ],
+                )
             }
             ConsensusEvent::BlockAnnouncement {
                 peer_id,
                 announcement,
             } => {
                 if let Err(error) = validate_block_announcement(&announcement) {
-                    return Ok(vec![ConsensusCommand::ReportBadPeer {
-                        peer_id,
-                        reason: format!("invalid block announcement: {error}"),
-                    }]);
+                    return decision(
+                        ConsensusOutcome::Rejected,
+                        vec![ConsensusCommand::ReportBadPeer {
+                            peer_id,
+                            reason: format!("invalid block announcement: {error}"),
+                        }],
+                    );
                 }
 
                 if self
@@ -264,53 +283,63 @@ where
                     .await
                     .is_some()
                 {
-                    return Ok(vec![ConsensusCommand::ReportGoodPeer {
-                        peer_id,
-                        reason: "announced already-known block".to_string(),
-                    }]);
+                    return decision(
+                        ConsensusOutcome::AlreadyKnown,
+                        vec![ConsensusCommand::ReportGoodPeer {
+                            peer_id,
+                            reason: "announced already-known block".to_string(),
+                        }],
+                    );
                 }
 
-                Ok(Vec::new())
+                decision(ConsensusOutcome::NoChange, Vec::new())
             }
             ConsensusEvent::BlockReceived { peer_id, block } => {
                 if let Err(error) = self.validate_block_candidate(&block) {
-                    return Ok(vec![ConsensusCommand::ReportBadPeer {
-                        peer_id,
-                        reason: format!("invalid block: {error}"),
-                    }]);
+                    return decision(
+                        ConsensusOutcome::Rejected,
+                        vec![ConsensusCommand::ReportBadPeer {
+                            peer_id,
+                            reason: format!("invalid block: {error}"),
+                        }],
+                    );
                 }
 
                 if self.chain_store.get_block(&block.hash).await.is_some() {
-                    return Ok(vec![
-                        // Keep the event-loop result idempotently successful so sync state is
-                        // cleared instead of trying to fetch the block's parent again.
-                        ConsensusCommand::StoreBlock(block),
-                        ConsensusCommand::ReportGoodPeer {
+                    return decision(
+                        ConsensusOutcome::AlreadyKnown,
+                        vec![ConsensusCommand::ReportGoodPeer {
                             peer_id,
                             reason: "already-known valid block received".to_string(),
-                        },
-                    ]);
+                        }],
+                    );
                 }
 
                 // A valid candidate with missing ancestry must be buffered by sync first.
                 if let Some(parent_hash) = &block.parent_hash
                     && self.chain_store.get_block(parent_hash).await.is_none()
                 {
-                    return Ok(Vec::new());
+                    return decision(ConsensusOutcome::MissingParent, Vec::new());
                 }
 
-                match self.validate_received_block(&block).await {
-                    Ok(()) => Ok(vec![
-                        ConsensusCommand::StoreBlock(block),
-                        ConsensusCommand::ReportGoodPeer {
+                match self.validate_chain_extension(&block).await {
+                    Ok(()) => decision(
+                        ConsensusOutcome::Accepted,
+                        vec![
+                            ConsensusCommand::StoreBlock(block),
+                            ConsensusCommand::ReportGoodPeer {
+                                peer_id,
+                                reason: "valid block received".to_string(),
+                            },
+                        ],
+                    ),
+                    Err(error) => decision(
+                        ConsensusOutcome::Rejected,
+                        vec![ConsensusCommand::ReportBadPeer {
                             peer_id,
-                            reason: "valid block received".to_string(),
-                        },
-                    ]),
-                    Err(error) => Ok(vec![ConsensusCommand::ReportBadPeer {
-                        peer_id,
-                        reason: format!("invalid block: {error}"),
-                    }]),
+                            reason: format!("invalid block: {error}"),
+                        }],
+                    ),
                 }
             }
         }
@@ -398,8 +427,8 @@ mod tests {
         assert_eq!(Some(genesis.clone()), other_store.tip().await);
         assert_eq!(genesis.height, 0);
         observer.validate_block_candidate(&genesis)?;
-        let commands = producer.handle_event(ConsensusEvent::Tick).await?;
-        let ConsensusCommand::StoreBlock(block) = &commands[0] else {
+        let decision = producer.handle_event(ConsensusEvent::Tick).await?;
+        let ConsensusCommand::StoreBlock(block) = &decision.commands[0] else {
             panic!("expected block")
         };
         assert_eq!(block.height, 1);
@@ -514,8 +543,8 @@ mod tests {
         for received in [false, true] {
             let previous_tip = store.tip().await.unwrap();
             let previous_bytes = std::fs::read(&path)?;
-            let commands = consensus.handle_event(ConsensusEvent::Tick).await?;
-            let ConsensusCommand::StoreBlock(candidate) = &commands[0] else {
+            let decision = consensus.handle_event(ConsensusEvent::Tick).await?;
+            let ConsensusCommand::StoreBlock(candidate) = &decision.commands[0] else {
                 panic!("expected proposed block");
             };
             let candidate = candidate.clone();
@@ -529,8 +558,8 @@ mod tests {
             };
             // A directory at the temporary-file path forces a real write failure.
             std::fs::create_dir(path.with_extension("tmp"))?;
-            let commands = consensus.handle_event(event.clone()).await?;
-            let ConsensusCommand::StoreBlock(block) = &commands[0] else {
+            let decision = consensus.handle_event(event.clone()).await?;
+            let ConsensusCommand::StoreBlock(block) = &decision.commands[0] else {
                 panic!("expected store command");
             };
             assert!(store.insert(block.clone()).await.is_err());
@@ -541,7 +570,7 @@ mod tests {
 
             std::fs::remove_dir(path.with_extension("tmp"))?;
             let retry = consensus.handle_event(event).await?;
-            let ConsensusCommand::StoreBlock(block) = &retry[0] else {
+            let ConsensusCommand::StoreBlock(block) = &retry.commands[0] else {
                 panic!("retry must still accept the same block");
             };
             assert_eq!(block, &candidate);
@@ -553,7 +582,7 @@ mod tests {
             );
             let next = consensus.handle_event(ConsensusEvent::Tick).await?;
             assert!(matches!(
-                &next[0],
+                &next.commands[0],
                 ConsensusCommand::StoreBlock(block)
                     if block.height == candidate.height + 1
                         && block.parent_hash == Some(candidate.hash.clone())
@@ -567,9 +596,9 @@ mod tests {
     #[tokio::test]
     async fn tick_produces_store_and_broadcast_commands() -> anyhow::Result<()> {
         let consensus = SimpleConsensus::new("node-a", ChainStore::new());
-        let commands = consensus.handle_event(ConsensusEvent::Tick).await?;
+        let decision = consensus.handle_event(ConsensusEvent::Tick).await?;
 
-        assert!(matches!(commands.as_slice(), [
+        assert!(matches!(decision.commands.as_slice(), [
             ConsensusCommand::StoreBlock(block_a),
             ConsensusCommand::BroadcastBlock(block_b),
         ] if block_a == block_b && block_a.height == 0 && block_a.parent_hash.is_none()));
@@ -586,9 +615,10 @@ mod tests {
                 validator_id_from_seed("node-b"),
             ],
         )?;
-        let commands = consensus.handle_event(ConsensusEvent::Tick).await?;
+        let decision = consensus.handle_event(ConsensusEvent::Tick).await?;
 
-        assert!(commands.is_empty());
+        assert_eq!(decision.outcome, ConsensusOutcome::NoChange);
+        assert!(decision.commands.is_empty());
         Ok(())
     }
 
@@ -598,10 +628,10 @@ mod tests {
         store.insert(signed_block("node-a", None, 0)).await?;
         let consensus = SimpleConsensus::new("node-a", store);
 
-        let commands = consensus.handle_event(ConsensusEvent::Tick).await?;
+        let decision = consensus.handle_event(ConsensusEvent::Tick).await?;
 
         assert!(
-            matches!(commands.as_slice(), [ConsensusCommand::StoreBlock(block), ..] if block.height == 1)
+            matches!(decision.commands.as_slice(), [ConsensusCommand::StoreBlock(block), ..] if block.height == 1)
         );
         Ok(())
     }
@@ -619,22 +649,28 @@ mod tests {
         )?;
         let parent = signed_block("node-a", None, 0);
 
-        consensus
+        let received = consensus
             .handle_event(ConsensusEvent::BlockReceived {
                 peer_id: PeerId::from("node-a"),
                 block: parent.clone(),
             })
             .await?;
+        assert_eq!(received.outcome, ConsensusOutcome::Accepted);
+        assert!(matches!(received.commands.as_slice(), [
+            ConsensusCommand::StoreBlock(block),
+            ConsensusCommand::ReportGoodPeer { .. },
+        ] if block == &parent));
         assert!(
             consensus
                 .handle_event(ConsensusEvent::Tick)
                 .await?
+                .commands
                 .is_empty()
         );
         store.insert(parent.clone()).await?;
-        let commands = consensus.handle_event(ConsensusEvent::Tick).await?;
+        let decision = consensus.handle_event(ConsensusEvent::Tick).await?;
 
-        assert!(matches!(commands.as_slice(), [
+        assert!(matches!(decision.commands.as_slice(), [
             ConsensusCommand::StoreBlock(block_a),
             ConsensusCommand::BroadcastBlock(block_b),
         ] if block_a == block_b && block_a.height == 1 && block_a.parent_hash == Some(parent.hash)));
@@ -648,17 +684,18 @@ mod tests {
         let block = signed_block("node-a", None, 0);
         store.insert(block.clone()).await?;
 
-        let commands = consensus
+        let decision = consensus
             .handle_event(ConsensusEvent::BlockReceived {
                 peer_id: PeerId::from("peer-a"),
                 block: block.clone(),
             })
             .await?;
 
-        assert!(matches!(commands.as_slice(), [
-            ConsensusCommand::StoreBlock(stored),
-            ConsensusCommand::ReportGoodPeer { .. },
-        ] if stored == &block));
+        assert_eq!(decision.outcome, ConsensusOutcome::AlreadyKnown);
+        assert!(matches!(
+            decision.commands.as_slice(),
+            [ConsensusCommand::ReportGoodPeer { .. },]
+        ));
         Ok(())
     }
 
@@ -667,14 +704,15 @@ mod tests {
         let consensus = SimpleConsensus::new("node-a", ChainStore::new());
         let block = signed_block("node-a", Some(BlockHash::from_u8(1)), 1);
 
-        let commands = consensus
+        let decision = consensus
             .handle_event(ConsensusEvent::BlockReceived {
                 peer_id: PeerId::from("peer-a"),
                 block,
             })
             .await?;
 
-        assert!(commands.is_empty());
+        assert_eq!(decision.outcome, ConsensusOutcome::MissingParent);
+        assert!(decision.commands.is_empty());
         Ok(())
     }
 
@@ -690,14 +728,15 @@ mod tests {
         let wrong_height = signed_block("node-a", Some(parent.hash), 10);
 
         for block in [invalid_orphan, wrong_height] {
-            let commands = consensus
+            let decision = consensus
                 .handle_event(ConsensusEvent::BlockReceived {
                     peer_id: PeerId::from("peer-a"),
                     block,
                 })
                 .await?;
+            assert_eq!(decision.outcome, ConsensusOutcome::Rejected);
             assert!(matches!(
-                commands.as_slice(),
+                decision.commands.as_slice(),
                 [ConsensusCommand::ReportBadPeer { .. }]
             ));
         }
@@ -722,14 +761,15 @@ mod tests {
         invalid_signature.hash = block_hash(&invalid_signature);
 
         for block in [wrong_hash, wrong_producer, invalid_signature] {
-            let commands = consensus
+            let decision = consensus
                 .handle_event(ConsensusEvent::BlockReceived {
                     peer_id: PeerId::from("peer-a"),
                     block,
                 })
                 .await?;
+            assert_eq!(decision.outcome, ConsensusOutcome::Rejected);
             assert!(matches!(
-                commands.as_slice(),
+                decision.commands.as_slice(),
                 [ConsensusCommand::ReportBadPeer { .. }]
             ));
         }
@@ -740,7 +780,7 @@ mod tests {
     async fn announcement_does_not_request_missing_block() -> anyhow::Result<()> {
         let consensus = SimpleConsensus::new("node-a", ChainStore::new());
         let block_hash = BlockHash::from_u8(7);
-        let commands = consensus
+        let decision = consensus
             .handle_event(ConsensusEvent::BlockAnnouncement {
                 peer_id: PeerId::from("peer-a"),
                 announcement: BlockAnnouncement {
@@ -750,7 +790,7 @@ mod tests {
             })
             .await?;
 
-        assert!(commands.is_empty());
+        assert!(decision.commands.is_empty());
         Ok(())
     }
 }
