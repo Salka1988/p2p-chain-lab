@@ -15,6 +15,7 @@
 
 # Markdown docs
 *.md
+!ARCHITECTURE_MIGRATION.md
 
 # Local environment files
 .env

@@ -2187,6 +2187,7 @@ name = "p2p-chain-lib-consensus"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "bincode",
  "ed25519-dalek",
  "p2p-chain-lib-chain",
  "p2p-chain-lib-ports",

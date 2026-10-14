@@ -59,7 +59,11 @@ struct Cli {
     )]
     validator: Option<Vec<String>>,
 
-    #[arg(long = "produce-block-interval-ms", value_parser = clap::value_parser!(u64).range(1..))]
+    #[arg(
+        long = "produce-block-interval-ms",
+        help = "produce on this interval; every scheduled validator must be online because SimpleConsensus has no leader failover",
+        value_parser = clap::value_parser!(u64).range(1..)
+    )]
     produce_block_interval_ms: Option<u64>,
 
     #[arg(long, value_parser = clap::value_parser!(u16).range(1..))]

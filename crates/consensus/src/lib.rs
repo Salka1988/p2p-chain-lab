@@ -134,8 +134,10 @@ where
             body,
         };
         genesis.hash = block_hash(&genesis);
-        if let Some(mut block) = consensus.chain_store.selected_tip().await {
-            while block.height > 0 {
+        if let Some(tip) = consensus.chain_store.selected_tip().await {
+            let mut chain = vec![tip];
+            while chain.last().is_some_and(|block| block.height > 0) {
+                let block = chain.last().expect("chain contains its tip");
                 let parent = block
                     .parent_hash
                     .as_ref()
@@ -146,12 +148,23 @@ where
                     .await
                     .ok_or_else(|| anyhow::anyhow!("stored chain is missing an ancestor"))?;
                 anyhow::ensure!(parent.height == block.height - 1, "invalid stored ancestry");
-                block = parent;
+                chain.push(parent);
             }
+            chain.reverse();
             anyhow::ensure!(
-                block == genesis,
+                chain.first() == Some(&genesis),
                 "stored genesis does not match configuration; use a new chain_path for a new chain"
             );
+            for blocks in chain.windows(2) {
+                let [parent, block] = blocks else {
+                    unreachable!("windows of two have two blocks")
+                };
+                anyhow::ensure!(
+                    block.parent_hash.as_ref() == Some(&parent.hash),
+                    "invalid stored ancestry"
+                );
+                consensus.validate_block_candidate(block)?;
+            }
         } else {
             consensus.chain_store.insert_block(genesis.clone()).await?;
         }
@@ -512,6 +525,52 @@ mod tests {
             .is_err()
         );
         assert_eq!(std::fs::read(&genesis_path)?, bytes);
+        std::fs::remove_dir_all(path)?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn rejects_a_recovered_block_with_altered_contents() -> anyhow::Result<()> {
+        let path = std::env::temp_dir().join(format!(
+            "recovered-block-validation-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)?
+                .as_nanos()
+        ));
+        let validators = vec![validator_id_from_seed("node-a")];
+        let store = ChainStore::open(&path).await?;
+        let consensus = SimpleConsensus::with_genesis(
+            "node-a",
+            store.clone(),
+            "recovery-validation",
+            validators.clone(),
+        )
+        .await?;
+        let decision = consensus.handle_event(ConsensusEvent::Tick).await?;
+        let ConsensusCommand::StoreBlock(block) = &decision.commands[0] else {
+            panic!("tick must propose a block");
+        };
+        let block = block.clone();
+        assert!(store.insert(block.clone()).await?);
+        drop(consensus);
+        drop(store);
+
+        let block_path = path.join(format!("{}.block", block.hash));
+        let mut altered: Block = bincode::deserialize(&std::fs::read(&block_path)?)?;
+        altered.body.push(0);
+        std::fs::write(&block_path, bincode::serialize(&altered)?)?;
+
+        assert!(
+            SimpleConsensus::with_genesis(
+                "node-a",
+                ChainStore::open(&path).await?,
+                "recovery-validation",
+                validators,
+            )
+            .await
+            .is_err()
+        );
         std::fs::remove_dir_all(path)?;
         Ok(())
     }

@@ -17,9 +17,15 @@ use p2p_chain_lib_chain::{
 
 #[derive(Debug, Clone, Default)]
 pub struct ChainStore {
-    blocks: Arc<Mutex<HashMap<BlockHash, Block>>>,
+    state: Arc<Mutex<StoreState>>,
     persistence_path: Option<Arc<PathBuf>>,
     write_gate: Arc<Mutex<()>>,
+}
+
+#[derive(Debug, Default)]
+struct StoreState {
+    blocks: HashMap<BlockHash, Block>,
+    selected_tip: Option<Block>,
 }
 
 impl ChainStore {
@@ -58,8 +64,12 @@ impl ChainStore {
                 );
                 blocks.insert(block.hash.clone(), block);
             }
+            let selected_tip = blocks.values().max_by_key(|block| block.height).cloned();
             Ok(Self {
-                blocks: Arc::new(Mutex::new(blocks)),
+                state: Arc::new(Mutex::new(StoreState {
+                    blocks,
+                    selected_tip,
+                })),
                 persistence_path: Some(Arc::new(path)),
                 write_gate: Arc::new(Mutex::new(())),
             })
@@ -68,31 +78,36 @@ impl ChainStore {
     }
 
     pub async fn get(&self, hash: &BlockHash) -> Option<Block> {
-        self.blocks.lock().await.get(hash).cloned()
+        self.state.lock().await.blocks.get(hash).cloned()
     }
 
     pub async fn insert(&self, block: Block) -> anyhow::Result<bool> {
         let gate = self.write_gate.clone().lock_owned().await;
-        if self.blocks.lock().await.contains_key(&block.hash) {
+        if self.state.lock().await.blocks.contains_key(&block.hash) {
             return Ok(false);
         }
         let Some(path) = self.persistence_path.clone() else {
-            self.blocks.lock().await.insert(block.hash.clone(), block);
+            let mut state = self.state.lock().await;
+            Self::commit(&mut state, block);
             return Ok(true);
         };
-        let blocks = self.blocks.clone();
+        let state = self.state.clone();
         // The worker owns both the gate and memory commit, even if its caller is cancelled.
         tokio::task::spawn_blocking(move || {
             let _gate = gate;
-            Self::persist(&path, &block)?;
-            blocks.blocking_lock().insert(block.hash.clone(), block);
-            Ok(true)
+            Self::persist_block(&path, &block)?;
+            // Rename made the block visible. Keep memory in step with disk even if
+            // directory syncing reports a durability error to the caller.
+            let directory_sync = Self::sync_directory(&path);
+            let mut state = state.blocking_lock();
+            Self::commit(&mut state, block);
+            directory_sync.map(|()| true)
         })
         .await?
     }
 
     pub async fn len(&self) -> usize {
-        self.blocks.lock().await.len()
+        self.state.lock().await.blocks.len()
     }
 
     pub async fn is_empty(&self) -> bool {
@@ -100,15 +115,21 @@ impl ChainStore {
     }
 
     pub async fn tip(&self) -> Option<Block> {
-        self.blocks
-            .lock()
-            .await
-            .values()
-            .max_by_key(|block| block.height)
-            .cloned()
+        self.state.lock().await.selected_tip.clone()
     }
 
-    fn persist(path: &Path, block: &Block) -> anyhow::Result<()> {
+    fn commit(state: &mut StoreState, block: Block) {
+        if state
+            .selected_tip
+            .as_ref()
+            .is_none_or(|tip| block.height > tip.height)
+        {
+            state.selected_tip = Some(block.clone());
+        }
+        state.blocks.insert(block.hash.clone(), block);
+    }
+
+    fn persist_block(path: &Path, block: &Block) -> anyhow::Result<()> {
         let bytes = bincode::serialize(block)?;
         let temporary_path = path.join(format!("{}.tmp", block.hash));
         let final_path = path.join(format!("{}.block", block.hash));
@@ -116,6 +137,10 @@ impl ChainStore {
         file.write_all(&bytes)?;
         file.sync_all()?;
         fs::rename(&temporary_path, &final_path)?;
+        Ok(())
+    }
+
+    fn sync_directory(path: &Path) -> anyhow::Result<()> {
         File::open(path)?.sync_all()?;
         Ok(())
     }
@@ -164,6 +189,19 @@ mod tests {
             .ok_or_else(|| anyhow::anyhow!("expected stored block"))?;
         assert_eq!(stored.height, 1);
         assert_eq!(store.len().await, 1);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn selected_tip_is_updated_only_by_a_higher_block() -> anyhow::Result<()> {
+        let store = ChainStore::new();
+        let mut tip = block(2);
+        tip.height = 2;
+        let lower = block(1);
+
+        assert!(store.insert(tip.clone()).await?);
+        assert!(store.insert(lower).await?);
+        assert_eq!(store.tip().await, Some(tip));
         Ok(())
     }
 
@@ -263,7 +301,7 @@ mod tests {
         drop(gate);
         // Let the insert perform its existence check and dispatch the blocking worker.
         tokio::task::yield_now().await;
-        let memory = store.blocks.lock().await;
+        let memory = store.state.lock().await;
         tokio::time::timeout(std::time::Duration::from_secs(2), async {
             while !path.join(format!("{}.block", expected.hash)).exists() {
                 tokio::task::yield_now().await;
