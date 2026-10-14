@@ -222,7 +222,9 @@ impl SyncService {
             self.network.request_block(peer_id.clone(), hash.clone()),
         )
         .await;
-        if !matches!(result, Ok(Ok(()))) {
+        if matches!(result, Ok(Ok(()))) {
+            tracing::info!(%peer_id, block_hash = %hash, "block sync requested");
+        } else {
             // Local queue pressure is not evidence of remote peer misconduct.
             tracing::warn!(%peer_id, block_hash = %hash, ?result, "failed to dispatch sync request");
             self.clear_pending(&hash).await;

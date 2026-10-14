@@ -124,7 +124,7 @@ impl Node {
                             peer_id,
                             announcement,
                         } => {
-                            tracing::info!(
+                            tracing::debug!(
                                 %peer_id,
                                 block_hash = %announcement.block_hash,
                                 height = announcement.height,
